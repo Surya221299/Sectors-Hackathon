@@ -78,7 +78,7 @@ async def mark_all_alerts_read(
         params,
     )
     await db.commit()
-    return {"updated": res.rowcount or 0}
+    return {"updated": getattr(res, "rowcount", 0) or 0}
 
 
 @router.post("/alerts/{alert_id}/read", response_model=Alert)
