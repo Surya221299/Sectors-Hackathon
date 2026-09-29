@@ -14,8 +14,10 @@ docker build -t invelio-backend .
 docker run -p 8000:8000 --env-file .env invelio-backend   # local check
 ```
 
-Keep **one instance** running. The scoring run lock is per process, so several instances could
-each start a scoring run and pay for it.
+Keep **one instance** running. The scoring run lock and the alert scheduler are per process, so
+several instances would each scan and score, and each pay for it. For the same reason, laptops
+running the backend for development should keep `USE_MOCK_DATA=true`: with real data, every
+running backend starts its own alert scheduler on the team key.
 
 ### Environment variables
 
@@ -25,16 +27,17 @@ Set these in the host's dashboard. Never commit them.
 |---|---|---|
 | `SECTORS_API_KEY` | the team key | Every real call spends credits |
 | `GEMINI_API_KEY` | AI Studio key | Scoring reasoning and chatbot |
-| `DATABASE_URL` | Supabase connection string | Must start with `postgresql+asyncpg://` (see below) |
+| `DATABASE_URL` | Supabase connection string | `postgresql://` is converted to `postgresql+asyncpg://` automatically |
 | `USE_MOCK_DATA` | `false` | `true` serves saved sample data, 0 credits |
 | `USE_MCP` | `true` for the demo | Chatbot uses the Sectors MCP server; each question spends credits |
 | `ENVIRONMENT` | `production` | Turns off SQL logging |
 | `CHATBOT_MODEL` | optional | Defaults to `gemini-3.5-flash-lite` |
+| `ALERT_SCAN_INTERVAL_MINUTES` | `60` | Default 30. Each scan costs ~5 credits, weekdays 09:00–16:00 WIB only |
 
 ### Supabase connection string
 
-- Copy it from Supabase: Project Settings → Database → Connection string, and change the prefix
-  from `postgresql://` to `postgresql+asyncpg://`.
+- Copy it from Supabase: Project Settings → Database → Connection string. The backend switches
+  the `postgresql://` prefix to the asyncpg driver itself.
 - Use the **Session pooler** string. The direct connection is IPv6-only on Supabase unless the
   IPv4 add-on is enabled, and many hosts cannot reach IPv6.
 - Avoid the **Transaction pooler** (port 6543): it does not support the prepared statements
@@ -67,6 +70,8 @@ While recording:
 
 - **Home / stock detail / market overview:** a few credits at most. Responses are cached for
   5–10 minutes, so reopening screens is free within that window.
+- **Alert scheduler:** runs by itself every `ALERT_SCAN_INTERVAL_MINUTES` during market hours,
+  about 5 credits per scan (≈35 credits a day at 60 minutes, ≈70 at 30).
 - **Chatbot with `USE_MCP=true`:** each question calls Sectors directly (no cache), usually 2–6
   credits. Ask about the 10 tracked tickers only; others are refused before any call is made.
 - **Portfolio and alerts:** no Sectors credits.
@@ -96,7 +101,7 @@ rehearsal plus the recording should stay well under 200 credits.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `/api/status` shows `"mock_data": true` | `USE_MOCK_DATA` not set to `false` | Set it and redeploy |
-| 500 errors on every data screen | `DATABASE_URL` wrong or unreachable | Use the Session pooler string with the `+asyncpg` prefix |
+| 500 errors on every data screen | `DATABASE_URL` wrong or unreachable | Use the Session pooler connection string |
 | `DuplicatePreparedStatementError` in logs | Transaction pooler (port 6543) | Switch to the Session pooler |
 | Chatbot returns 429 | Gemini free-tier quota reached | Wait for the reset, or enable billing on the AI Studio project |
 | Chatbot returns 503 | Gemini overloaded | Retry after a few seconds |
