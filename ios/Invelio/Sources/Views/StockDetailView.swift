@@ -134,26 +134,31 @@ public struct PurchaseFormEntry: Identifiable, Equatable {
     public let id: UUID
     public var date: Date
     public var priceInput: String
-    public var totalInput: String
+    public var lotInput: String
 
-    public init(id: UUID = UUID(), date: Date = Date(), priceInput: String = "", totalInput: String = "") {
+    public init(id: UUID = UUID(), date: Date = Date(), priceInput: String = "", lotInput: String = "") {
         self.id = id
         self.date = date
         self.priceInput = priceInput
-        self.totalInput = totalInput
+        self.lotInput = lotInput
     }
 
     public var price: Double {
         StockFormatters.parseCurrencyInput(priceInput)
     }
 
-    public var total: Double {
-        StockFormatters.parseCurrencyInput(totalInput)
+    public var lots: Double {
+        StockFormatters.parseCurrencyInput(lotInput)
     }
 
+    /// 1 Lot = 100 Shares (lembar) in Indonesian Stock Exchange (IDX)
     public var shares: Double {
-        guard price > 0, total > 0 else { return 0.0 }
-        return total / price
+        return lots * 100.0
+    }
+
+    /// Total portfolio buy nominal = shares * price per share (e.g. 1 lot * 100 shares * Rp 6.000 = Rp 600.000)
+    public var total: Double {
+        return shares * price
     }
 
     public var formattedShares: String {
@@ -163,6 +168,16 @@ public struct PurchaseFormEntry: Identifiable, Equatable {
         } else {
             let str = String(format: "%.2f", shares)
             return str.hasSuffix("0") ? String(format: "%.1f", shares) : str
+        }
+    }
+
+    public var formattedLots: String {
+        guard lots > 0 else { return "0" }
+        if lots.truncatingRemainder(dividingBy: 1) == 0 {
+            return "\(Int(lots))"
+        } else {
+            let str = String(format: "%.2f", lots)
+            return str.hasSuffix("0") ? String(format: "%.1f", lots) : str
         }
     }
 }
@@ -1154,11 +1169,13 @@ public struct StockDetailView: View {
         let saved = stockLots
         if !saved.isEmpty {
             purchaseEntries = saved.map { lot in
-                PurchaseFormEntry(
+                let calculatedShares = lot.shares > 0 ? lot.shares : (lot.pricePerShare > 0 ? lot.totalInvested / lot.pricePerShare : 0)
+                let lotCount = calculatedShares / 100.0
+                return PurchaseFormEntry(
                     id: lot.id,
                     date: lot.buyDate,
                     priceInput: formatNumber(lot.pricePerShare),
-                    totalInput: formatNumber(lot.totalInvested)
+                    lotInput: formatNumber(lotCount)
                 )
             }
         } else if purchaseEntries.isEmpty {
@@ -1166,7 +1183,7 @@ public struct StockDetailView: View {
                 PurchaseFormEntry(
                     date: Date(),
                     priceInput: formatNumber(quote.price),
-                    totalInput: ""
+                    lotInput: ""
                 )
             ]
         }
@@ -1373,7 +1390,7 @@ public struct StockDetailView: View {
 
     // MARK: - Holdings & Purchase Form Section
     private var validEntries: [PurchaseFormEntry] {
-        purchaseEntries.filter { $0.price > 0 && $0.total > 0 }
+        purchaseEntries.filter { $0.price > 0 && $0.lots > 0 }
     }
 
     private var totalInvestedAmount: Double {
@@ -1384,10 +1401,20 @@ public struct StockDetailView: View {
         validEntries.reduce(0) { $0 + $1.shares }
     }
 
+    private var totalCalculatedLots: Double {
+        validEntries.reduce(0) { $0 + $1.lots }
+    }
+
     private var formattedTotalShares: String {
         let s = totalCalculatedShares
         guard s > 0 else { return "0" }
         return s.truncatingRemainder(dividingBy: 1) == 0 ? "\(Int(s))" : String(format: "%.2f", s)
+    }
+
+    private var formattedTotalLots: String {
+        let l = totalCalculatedLots
+        guard l > 0 else { return "0" }
+        return l.truncatingRemainder(dividingBy: 1) == 0 ? "\(Int(l))" : String(format: "%.2f", l)
     }
 
     private var averagePricePerShare: Double {
@@ -1435,7 +1462,7 @@ public struct StockDetailView: View {
                     summaryTile(
                         title: "Position Value",
                         value: "\(currencyPrefix)\(StockFormatters.stockPrice(currentPositionValue, currency: quote.currency))",
-                        caption: "\(formattedTotalShares) Shares",
+                        caption: "\(formattedTotalLots) Lot (\(formattedTotalShares) Shares)",
                         icon: "chart.pie.fill",
                         color: Color(hex: "38BDF8")
                     )
@@ -1504,7 +1531,7 @@ public struct StockDetailView: View {
                                             }
                                         }
                                         if purchaseEntries.isEmpty {
-                                            purchaseEntries = [PurchaseFormEntry(date: Date(), priceInput: formatNumber(quote.price), totalInput: "")]
+                                            purchaseEntries = [PurchaseFormEntry(date: Date(), priceInput: formatNumber(quote.price), lotInput: "")]
                                         }
                                     }
                                 } label: {
@@ -1520,20 +1547,46 @@ public struct StockDetailView: View {
                         HStack(spacing: 8) {
                             let prefix = currencyPrefix.trimmingCharacters(in: .whitespaces)
                             inputField(label: "Cost / Share", prefix: prefix, text: $entry.priceInput)
-                            inputField(label: "Total Buy", prefix: prefix, text: $entry.totalInput, fontSize: 13.5, prefixSize: 11)
+                            inputField(label: "Total Lot", prefix: "", text: $entry.lotInput, suffix: "lot", fontSize: 14)
 
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("Shares")
+                                Text("Total Buy")
                                     .font(.system(size: 11, weight: .bold))
                                     .foregroundStyle(Color.white.opacity(0.65))
-                                Text(entry.formattedShares)
-                                    .font(.system(size: 15, weight: .bold, design: .rounded))
-                                    .foregroundStyle(Color.white)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(8)
-                                    .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
+                                HStack(spacing: 2) {
+                                    if entry.total > 0 {
+                                        Text(prefix)
+                                            .font(.system(size: 10.5, weight: .bold))
+                                            .foregroundStyle(Color.white.opacity(0.65))
+                                        Text(StockFormatters.stockPrice(entry.total, currency: quote.currency))
+                                            .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                                            .foregroundStyle(Color.white)
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.65)
+                                    } else {
+                                        Text("0")
+                                            .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                                            .foregroundStyle(Color.white.opacity(0.4))
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                                .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
                             }
                             .frame(maxWidth: .infinity)
+                        }
+
+                        if entry.lots > 0 {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Color(hex: "38BDF8"))
+                                Text("\(entry.formattedLots) Lot = \(entry.formattedShares) Shares • 1 Lot = 100 lembar")
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .foregroundStyle(Color.white.opacity(0.6))
+                                Spacer()
+                            }
+                            .padding(.horizontal, 2)
                         }
                     }
                     .padding(12)
@@ -1543,7 +1596,7 @@ public struct StockDetailView: View {
                 // Add Share Button
                 Button {
                     withAnimation(.spring()) {
-                        purchaseEntries.append(PurchaseFormEntry(date: Date(), priceInput: formatNumber(quote.price), totalInput: ""))
+                        purchaseEntries.append(PurchaseFormEntry(date: Date(), priceInput: formatNumber(quote.price), lotInput: ""))
                     }
                 } label: {
                     HStack(spacing: 5) {
@@ -1560,20 +1613,34 @@ public struct StockDetailView: View {
         }
     }
 
-    private func inputField(label: String, prefix: String, text: Binding<String>, fontSize: CGFloat = 15, prefixSize: CGFloat = 12) -> some View {
+    private func inputField(
+        label: String,
+        prefix: String,
+        text: Binding<String>,
+        suffix: String = "",
+        fontSize: CGFloat = 15,
+        prefixSize: CGFloat = 12
+    ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label)
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(Color.white.opacity(0.65))
             HStack(spacing: 3) {
-                Text(prefix)
-                    .font(.system(size: prefixSize, weight: .bold))
-                    .foregroundStyle(Color.white.opacity(0.65))
+                if !prefix.isEmpty {
+                    Text(prefix)
+                        .font(.system(size: prefixSize, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.65))
+                }
                 TextField("0", text: text)
                     .keyboardType(.decimalPad)
                     .font(.system(size: fontSize, weight: .bold, design: .rounded))
                     .minimumScaleFactor(0.75)
                     .foregroundStyle(Color.white)
+                if !suffix.isEmpty {
+                    Text(suffix)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.55))
+                }
             }
             .padding(8)
             .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))

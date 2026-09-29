@@ -22,6 +22,10 @@ public final class HoldingLot {
     public var shares: Double = 0.0
     public var createdAt: Date = Date()
 
+    public var lots: Double {
+        return shares / 100.0
+    }
+
     public init(
         id: UUID = UUID(),
         ticker: String,
@@ -33,6 +37,7 @@ public final class HoldingLot {
         pricePerShare: Double = 0.0,
         totalInvested: Double = 0.0,
         shares: Double? = nil,
+        lots: Double? = nil,
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -43,8 +48,9 @@ public final class HoldingLot {
         self.currency = currency
         self.buyDate = buyDate
         self.pricePerShare = pricePerShare
-        self.totalInvested = totalInvested
-        self.shares = shares ?? (pricePerShare > 0 ? totalInvested / pricePerShare : 0.0)
+        let resolvedShares = shares ?? (lots != nil ? lots! * 100.0 : (pricePerShare > 0 ? totalInvested / pricePerShare : 0.0))
+        self.shares = resolvedShares
+        self.totalInvested = totalInvested > 0 ? totalInvested : (resolvedShares * pricePerShare)
         self.createdAt = createdAt
     }
 }
