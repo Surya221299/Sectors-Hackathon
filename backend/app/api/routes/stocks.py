@@ -9,6 +9,7 @@ from app.api.deps import get_sectors
 from app.clients.cached_sectors import CachedSectorsClient
 from app.clients.sectors import bare_symbol
 from app.db.database import get_db
+from app.db.scores import latest_scores
 from app.db.stock_insights import latest_stock_insights, stock_insights_generated_today
 from app.models.schemas import (
     Fundamentals,
@@ -31,16 +32,21 @@ def ratio(value: float | None) -> float | None:
     return None if value is None else round(value, 2)
 
 
-def to_summary(row: dict[str, Any]) -> StockSummary:
+def to_summary(
+    row: dict[str, Any], score_info: dict[str, Any] | None = None
+) -> StockSummary:
     q = row["query_values"]
+    ticker = bare_symbol(row["symbol"])
     return StockSummary(
-        ticker=bare_symbol(row["symbol"]),
+        ticker=ticker,
         name=row["company_name"],
         sector=q["sector"],
         sub_sector=q["sub_sector"],
         price=q["last_close_price"],
         change_pct=pct(q.get("daily_close_change")),
         market_cap=q.get("market_cap"),
+        recommendation=score_info.get("recommendation") if score_info else None,
+        overall_score=score_info.get("overall_score") if score_info else None,
     )
 
 
@@ -50,8 +56,19 @@ async def tracked_rows(sectors: CachedSectorsClient) -> list[dict[str, Any]]:
 
 
 @router.get("/stocks", response_model=StockListResponse)
-async def list_stocks(sectors: CachedSectorsClient = Depends(get_sectors)) -> StockListResponse:
-    return StockListResponse(stocks=[to_summary(r) for r in await tracked_rows(sectors)])
+async def list_stocks(
+    db: AsyncSession = Depends(get_db),
+    sectors: CachedSectorsClient = Depends(get_sectors),
+) -> StockListResponse:
+    rows = await tracked_rows(sectors)
+    try:
+        scores = await latest_scores(db)
+        score_map = {s["ticker"]: s for s in scores}
+    except Exception:
+        score_map = {}
+    return StockListResponse(
+        stocks=[to_summary(r, score_map.get(bare_symbol(r["symbol"]))) for r in rows]
+    )
 
 
 @router.get("/stock/{ticker}", response_model=StockDetail)
@@ -96,18 +113,31 @@ async def get_stock(
     else:
         daily = cast(list[dict[str, Any]], await sectors.get_daily_prices(ticker))
 
+    scores_list: list[dict[str, Any]] = []
+    try:
+        scores_list = await latest_scores(db)
+    except Exception:
+        scores_list = []
+    score_info = next((s for s in scores_list if s["ticker"] == ticker), None)
+
     # Fetch stored AI insights for this ticker from PostgreSQL if available
     insight_chips: list[InsightChip] | None = None
     try:
         insight_rows = await latest_stock_insights(db, ticker)
-        if insight_rows:
-            insight_chips = [InsightChip(label=r["label"], text=r["content"]) for r in insight_rows]
+        chips = [InsightChip(label=r["label"], text=r["content"]) for r in insight_rows]
+        if score_info and score_info.get("reasoning"):
+            chips.insert(0, InsightChip(label="Scoring Agent", text=score_info["reasoning"]))
+        if chips:
+            insight_chips = chips
     except Exception:
-        insight_chips = None
+        if score_info and score_info.get("reasoning"):
+            insight_chips = [InsightChip(label="Scoring Agent", text=score_info["reasoning"])]
+        else:
+            insight_chips = None
 
     q = row["query_values"]
     return StockDetail(
-        **to_summary(row).model_dump(),
+        **to_summary(row, score_info).model_dump(),
         fundamentals=Fundamentals(
             pe=ratio(q.get("pe_ttm")),
             pb=ratio(q.get("pb_mrq")),
@@ -153,14 +183,24 @@ async def get_stock_insights(
         except Exception:
             rows = []
 
-    if not rows:
+    chips = [InsightChip(label=r["label"], text=r["content"]) for r in rows]
+    try:
+        scores_list = await latest_scores(db)
+        score_info = next((s for s in scores_list if s["ticker"] == clean_ticker), None)
+        if score_info and score_info.get("reasoning"):
+            chips.insert(0, InsightChip(label="Scoring Agent", text=score_info["reasoning"]))
+    except Exception:
+        pass
+
+    if not chips:
         raise HTTPException(
             status_code=404,
             detail=f"Insights not available for {clean_ticker}",
         )
 
+    gen_date = str(rows[0]["generated_date"]) if rows else "today"
     return StockInsightsResponse(
         ticker=clean_ticker,
-        generated_date=str(rows[0]["generated_date"]),
-        insights=[InsightChip(label=r["label"], text=r["content"]) for r in rows],
+        generated_date=gen_date,
+        insights=chips,
     )

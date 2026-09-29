@@ -27,6 +27,8 @@ class StockSummary(BaseModel):
     price: float
     change_pct: float | None
     market_cap: float | None
+    recommendation: str | None = None
+    overall_score: float | None = None
 
 
 class StockListResponse(BaseModel):
