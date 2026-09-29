@@ -69,13 +69,19 @@ async def test_real_client_raises_on_error() -> None:
 
 
 async def test_serves_last_good_response_when_api_fails() -> None:
-    responses = iter([httpx.Response(200, json=[{"close": 1}]), httpx.Response(503)])
-    client = SectorsClient(transport=httpx.MockTransport(lambda r: next(responses)))
+    api_down = False
 
-    first = await client.get_daily_prices("BBCA")
-    second = await client.get_daily_prices("BBCA")
+    def handler(request: httpx.Request) -> httpx.Response:
+        if api_down:
+            return httpx.Response(503)
+        return httpx.Response(200, json=[{"date": request.url.params["start"], "close": 1}])
 
-    assert first == second == [{"close": 1}]
+    client = SectorsClient(transport=httpx.MockTransport(handler))
+    first = await client.get_ihsg()
+    api_down = True
+    second = await client.get_ihsg()
+
+    assert first == second
 
 
 async def test_network_error_without_history_raises_503() -> None:
