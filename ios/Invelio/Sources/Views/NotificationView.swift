@@ -114,20 +114,37 @@ private struct AlertRow: View {
         return relative.localizedString(for: date, relativeTo: Date())
     }
 
+    private var cleanTicker: String? {
+        if let t = alert.ticker, !t.isEmpty {
+            return t.components(separatedBy: ".").first?.uppercased() ?? t.uppercased()
+        }
+        let knownTickers = ["BBCA", "BBRI", "BMRI", "BBNI", "ASII", "TLKM", "ANTM", "UNVR", "ICBP", "AMRT"]
+        for t in knownTickers {
+            if alert.message.contains(t) {
+                return t
+            }
+        }
+        return nil
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            ZStack {
-                Circle()
-                    .fill(severityColor.opacity(0.15))
-                    .frame(width: 40, height: 40)
-                Image(systemName: alertIcon)
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(severityColor)
+            if let ticker = cleanTicker {
+                StockAvatarView(symbol: ticker, name: ticker, size: 40)
+            } else {
+                ZStack {
+                    Circle()
+                        .fill(severityColor.opacity(0.15))
+                        .frame(width: 40, height: 40)
+                    Image(systemName: alertIcon)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(severityColor)
+                }
             }
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    if let ticker = alert.ticker {
+                    if let ticker = cleanTicker {
                         Text(ticker)
                             .font(.system(size: 13, weight: .bold))
                             .foregroundColor(.white)

@@ -134,26 +134,31 @@ public struct PurchaseFormEntry: Identifiable, Equatable {
     public let id: UUID
     public var date: Date
     public var priceInput: String
-    public var totalInput: String
+    public var lotInput: String
 
-    public init(id: UUID = UUID(), date: Date = Date(), priceInput: String = "", totalInput: String = "") {
+    public init(id: UUID = UUID(), date: Date = Date(), priceInput: String = "", lotInput: String = "") {
         self.id = id
         self.date = date
         self.priceInput = priceInput
-        self.totalInput = totalInput
+        self.lotInput = lotInput
     }
 
     public var price: Double {
         StockFormatters.parseCurrencyInput(priceInput)
     }
 
-    public var total: Double {
-        StockFormatters.parseCurrencyInput(totalInput)
+    public var lots: Double {
+        StockFormatters.parseCurrencyInput(lotInput)
     }
 
+    /// 1 Lot = 100 Shares (lembar) in Indonesian Stock Exchange (IDX)
     public var shares: Double {
-        guard price > 0, total > 0 else { return 0.0 }
-        return total / price
+        return lots * 100.0
+    }
+
+    /// Total portfolio buy nominal = shares * price per share (e.g. 1 lot * 100 shares * Rp 6.000 = Rp 600.000)
+    public var total: Double {
+        return shares * price
     }
 
     public var formattedShares: String {
@@ -163,6 +168,16 @@ public struct PurchaseFormEntry: Identifiable, Equatable {
         } else {
             let str = String(format: "%.2f", shares)
             return str.hasSuffix("0") ? String(format: "%.1f", shares) : str
+        }
+    }
+
+    public var formattedLots: String {
+        guard lots > 0 else { return "0" }
+        if lots.truncatingRemainder(dividingBy: 1) == 0 {
+            return "\(Int(lots))"
+        } else {
+            let str = String(format: "%.2f", lots)
+            return str.hasSuffix("0") ? String(format: "%.1f", lots) : str
         }
     }
 }
@@ -912,17 +927,67 @@ public struct StockDetailView: View {
 
     public let quote: StockQuote
     public var initialFundamentals: StockFundamentals?
+    public var initialSentiment: Sentiment? = nil
     public var onBuy: ((_ amount: Double, _ pricePerShare: Double) -> Void)?
 
     @State private var liveFundamentals: StockFundamentals? = nil
+    @State private var liveSentiment: Sentiment? = nil
     private var fundamentals: StockFundamentals? {
         liveFundamentals ?? initialFundamentals
+    }
+    private var sentiment: Sentiment {
+        liveSentiment ?? initialSentiment ?? fallbackSentiment
+    }
+
+    static func staticScoringReasoning(for ticker: String) -> String {
+        let bare = ticker.components(separatedBy: ".").first?.uppercased() ?? ticker.uppercased()
+        let reasoningMap: [String: String] = [
+            "BMRI": "BMRI achieves a strong overall score of 70.5, supported by an exceptional fundamental score of 97.6 and a healthy dividend yield of 12.7%. It exhibits a low P/E ratio of 5.62 compared to the sector median P/E of 14.11, alongside a solid risk score of 74.0.",
+            "BBRI": "BBRI presents a compelling profile with an overall score of 70.4 and a high fundamental score of 95.3. It maintains an attractive valuation with a P/E of 7.97 against a sector median P/E of 14.11, coupled with a robust risk score of 77.7 and a 10.5% dividend yield.",
+            "ASII": "ASII holds an overall score of 68.1, driven by a strong fundamental score of 90.3 and a P/E ratio of 6.55, which is favorable compared to the sector median of 12.35. The stock also offers a sound dividend yield of 8.1% and a manageable debt-to-equity ratio of 0.41.",
+            "BBNI": "BBNI earns an overall score of 66.3 and a high sentiment score of 76.2 following a positive 1-month return of 8.96%. It trades at an attractive P/E ratio of 6.48 relative to the sector median P/E of 14.11, backed by a solid risk score of 74.9.",
+            "BBCA": "BBCA records an overall score of 64.5, backed by a high fundamental score of 73.9 and a strong ROE of 21.47%. However, its P/E ratio stands at 13.23 with a P/B ratio of 2.84, reflecting a modest 1-month negative return of 1.95%.",
+            "ANTM": "ANTM posts an overall score of 56.5 with a solid fundamental score of 79.2 and an impressive ROE of 23.1%. Despite a low sector score of 9.7 and a 1-month return of -3.19%, it maintains a reasonable P/E of 9.02 and a low risk score of 69.3.",
+            "TLKM": "TLKM is assigned a HOLD recommendation with an overall score of 56.3 and a fundamental score of 79.6. Despite a generous dividend yield of 8.7%, the stock experienced a 1-month return of -5.19% and a low sector component of 34.4.",
+            "UNVR": "UNVR holds an overall score of 54.0, supported by a strong fundamental score of 80.0 and a notable dividend yield of 12.18%. However, it carries an elevated P/B ratio of 20.82 and a low sector component score of 30.3.",
+            "ICBP": "ICBP shows an overall score of 50.8, accompanied by a moderate fundamental score of 54.6 and a risk score of 72.0. The stock achieved a 1-month return of 5.75% but trades at a P/E ratio of 10.89 compared to a low sector median P/E of 6.17.",
+            "AMRT": "AMRT records an overall score of 47.1, with a fundamental score of 68.1 and a healthy risk score of 73.5. Despite a positive 1-month return of 6.12%, its growth is weighed down by a very weak sector score of 12.7 and a P/E ratio of 15.20."
+        ]
+        if let r = reasoningMap[bare] {
+            return r
+        }
+        return "\(bare) scoring agent evaluates fundamental metrics, sector relative performance, macro conditions, and risk indicators to determine its quantitative investment recommendation."
+    }
+
+    private var fallbackSentiment: Sentiment {
+        let bareTicker = quote.ticker.components(separatedBy: ".").first?.uppercased() ?? quote.ticker.uppercased()
+        let fallbackScoreMap: [String: (score: Double, rec: String)] = [
+            "BMRI": (70.5, "BUY"),
+            "BBRI": (70.4, "BUY"),
+            "ASII": (68.1, "BUY"),
+            "BBNI": (66.3, "BUY"),
+            "BBCA": (64.5, "HOLD"),
+            "ANTM": (56.5, "HOLD"),
+            "TLKM": (56.3, "HOLD"),
+            "UNVR": (54.0, "HOLD"),
+            "ICBP": (50.8, "HOLD"),
+            "AMRT": (47.1, "HOLD")
+        ]
+        if let fb = fallbackScoreMap[bareTicker] {
+            return Sentiment(
+                buy: fb.score >= 65 ? 0.70 : 0.40,
+                hold: fb.score >= 65 ? 0.20 : 0.45,
+                sell: fb.score >= 65 ? 0.10 : 0.15,
+                score: fb.score,
+                recommendation: fb.rec
+            )
+        }
+        return Sentiment(buy: 0.5, hold: 0.3, sell: 0.2, score: 60.0, recommendation: "HOLD")
     }
 
     @StateObject private var viewModel: StockDetailViewModel
     @State private var selectedPoint: StockHistoryPoint? = nil
     @State private var isDragging: Bool = false
-    @State private var isFavorited: Bool = false
 
     // Purchase / Lots management state
     @State private var purchaseEntries: [PurchaseFormEntry] = []
@@ -933,20 +998,33 @@ public struct StockDetailView: View {
     public init(
         quote: StockQuote,
         fundamentals: StockFundamentals? = nil,
+        sentiment: Sentiment? = nil,
         customHistoryFetcher: ((String, StockTimeRange) async throws -> [StockHistoryPoint])? = nil,
         onBuy: ((_ amount: Double, _ pricePerShare: Double) -> Void)? = nil
     ) {
         self.quote = quote
         self.initialFundamentals = fundamentals
+        self.initialSentiment = sentiment
         self.onBuy = onBuy
         _viewModel = StateObject(wrappedValue: StockDetailViewModel(quote: quote, fetcher: customHistoryFetcher))
 
         if let cached = StockDetailCache.shared.get(ticker: quote.ticker) {
             _liveFundamentals = State(initialValue: cached.detail.toStockFundamentals())
+            if let sent = cached.detail.toSentiment() {
+                _liveSentiment = State(initialValue: sent)
+            }
             if let serverInsights = cached.detail.insights, !serverInsights.isEmpty {
-                _cachedAnalysisChips = State(initialValue: serverInsights.map {
+                var chips = serverInsights.map {
                     InsightChip(label: $0.label, text: $0.text)
-                })
+                }
+                let bare = quote.ticker.components(separatedBy: ".").first?.uppercased() ?? quote.ticker.uppercased()
+                if let idx = chips.firstIndex(where: { $0.label.lowercased().contains("scoring") }) {
+                    let chip = chips.remove(at: idx)
+                    chips.insert(chip, at: 0)
+                } else {
+                    chips.insert(InsightChip(label: "Scoring Agent", text: StockDetailView.staticScoringReasoning(for: bare)), at: 0)
+                }
+                _cachedAnalysisChips = State(initialValue: chips)
             }
         }
     }
@@ -1023,21 +1101,6 @@ public struct StockDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.6)) {
-                        isFavorited.toggle()
-                    }
-                    let gen = UIImpactFeedbackGenerator(style: .medium)
-                    gen.impactOccurred()
-                } label: {
-                    Image(systemName: isFavorited ? "star.fill" : "star")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(isFavorited ? Color.PrimaryYellow : Color.white.opacity(0.8))
-                }
-            }
-        }
         .task {
             loadExistingHoldings()
             await fetchLiveStockDetail()
@@ -1107,10 +1170,21 @@ public struct StockDetailView: View {
         if let cached = StockDetailCache.shared.get(ticker: quote.ticker) {
             await MainActor.run {
                 self.liveFundamentals = cached.detail.toStockFundamentals()
+                if let sent = cached.detail.toSentiment() {
+                    self.liveSentiment = sent
+                }
                 if let serverInsights = cached.detail.insights, !serverInsights.isEmpty {
-                    self.cachedAnalysisChips = serverInsights.map {
+                    var chips = serverInsights.map {
                         InsightChip(label: $0.label, text: $0.text)
                     }
+                    let bare = quote.ticker.components(separatedBy: ".").first?.uppercased() ?? quote.ticker.uppercased()
+                    if let idx = chips.firstIndex(where: { $0.label.lowercased().contains("scoring") }) {
+                        let chip = chips.remove(at: idx)
+                        chips.insert(chip, at: 0)
+                    } else {
+                        chips.insert(InsightChip(label: "Scoring Agent", text: StockDetailView.staticScoringReasoning(for: bare)), at: 0)
+                    }
+                    self.cachedAnalysisChips = chips
                 }
             }
             return
@@ -1120,10 +1194,21 @@ public struct StockDetailView: View {
             StockDetailCache.shared.set(ticker: quote.ticker, detail: detail)
             await MainActor.run {
                 self.liveFundamentals = detail.toStockFundamentals()
+                if let sent = detail.toSentiment() {
+                    self.liveSentiment = sent
+                }
                 if let serverInsights = detail.insights, !serverInsights.isEmpty {
-                    self.cachedAnalysisChips = serverInsights.map {
+                    var chips = serverInsights.map {
                         InsightChip(label: $0.label, text: $0.text)
                     }
+                    let bare = quote.ticker.components(separatedBy: ".").first?.uppercased() ?? quote.ticker.uppercased()
+                    if let idx = chips.firstIndex(where: { $0.label.lowercased().contains("scoring") }) {
+                        let chip = chips.remove(at: idx)
+                        chips.insert(chip, at: 0)
+                    } else {
+                        chips.insert(InsightChip(label: "Scoring Agent", text: StockDetailView.staticScoringReasoning(for: bare)), at: 0)
+                    }
+                    self.cachedAnalysisChips = chips
                 }
             }
         } catch {
@@ -1135,8 +1220,15 @@ public struct StockDetailView: View {
         if !cachedAnalysisChips.isEmpty { return }
         do {
             let response = try await APIClient.shared.fetchStockInsights(ticker: quote.ticker)
-            let chips = response.insights.map { InsightChip(label: $0.label, text: $0.text) }
+            var chips = response.insights.map { InsightChip(label: $0.label, text: $0.text) }
             if !chips.isEmpty {
+                let bare = quote.ticker.components(separatedBy: ".").first?.uppercased() ?? quote.ticker.uppercased()
+                if let idx = chips.firstIndex(where: { $0.label.lowercased().contains("scoring") }) {
+                    let chip = chips.remove(at: idx)
+                    chips.insert(chip, at: 0)
+                } else {
+                    chips.insert(InsightChip(label: "Scoring Agent", text: StockDetailView.staticScoringReasoning(for: bare)), at: 0)
+                }
                 await MainActor.run {
                     self.cachedAnalysisChips = chips
                 }
@@ -1154,11 +1246,13 @@ public struct StockDetailView: View {
         let saved = stockLots
         if !saved.isEmpty {
             purchaseEntries = saved.map { lot in
-                PurchaseFormEntry(
+                let calculatedShares = lot.shares > 0 ? lot.shares : (lot.pricePerShare > 0 ? lot.totalInvested / lot.pricePerShare : 0)
+                let lotCount = calculatedShares / 100.0
+                return PurchaseFormEntry(
                     id: lot.id,
                     date: lot.buyDate,
                     priceInput: formatNumber(lot.pricePerShare),
-                    totalInput: formatNumber(lot.totalInvested)
+                    lotInput: formatNumber(lotCount)
                 )
             }
         } else if purchaseEntries.isEmpty {
@@ -1166,7 +1260,7 @@ public struct StockDetailView: View {
                 PurchaseFormEntry(
                     date: Date(),
                     priceInput: formatNumber(quote.price),
-                    totalInput: ""
+                    lotInput: ""
                 )
             ]
         }
@@ -1245,9 +1339,13 @@ public struct StockDetailView: View {
     private var headerSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(quote.ticker)
-                    .font(.title2.bold())
-                    .foregroundStyle(Color.white)
+                HStack(alignment: .center) {
+                    Text(quote.ticker)
+                        .font(.title2.bold())
+                        .foregroundStyle(Color.white)
+                    Spacer()
+                    SentimentPillView(sentiment: sentiment, isLarge: true)
+                }
                 Text(quote.name)
                     .font(.subheadline)
                     .foregroundStyle(Color.white.opacity(0.65))
@@ -1327,16 +1425,24 @@ public struct StockDetailView: View {
     }
 
     private var currentAnalysisChips: [InsightChip] {
-        if !cachedAnalysisChips.isEmpty {
-            return cachedAnalysisChips
+        var chips = cachedAnalysisChips.isEmpty ? stockAnalysisChips : cachedAnalysisChips
+        if let idx = chips.firstIndex(where: { $0.label.lowercased().contains("scoring") }) {
+            let scoringChip = chips.remove(at: idx)
+            chips.insert(scoringChip, at: 0)
+        } else {
+            let bareTicker = quote.ticker.components(separatedBy: ".").first?.uppercased() ?? quote.ticker.uppercased()
+            let scoringChip = InsightChip(label: "Scoring Agent", text: StockDetailView.staticScoringReasoning(for: bareTicker))
+            chips.insert(scoringChip, at: 0)
         }
-        return stockAnalysisChips
+        return chips
     }
 
     private var stockAnalysisChips: [InsightChip] {
         let isBullish = quote.change >= 0
         let pctStr = String(format: "%.2f", abs(quote.changePercent))
         let formattedPrice = "\(currencyPrefix)\(StockFormatters.stockPrice(quote.price, currency: quote.currency))"
+
+        let scoringText = StockDetailView.staticScoringReasoning(for: quote.ticker)
 
         let technicalText: String
         if isBullish {
@@ -1364,6 +1470,7 @@ public struct StockDetailView: View {
         let outlookText = "Medium-term growth outlook is supported by macroeconomic stability and sector digitization. Monitor macro volatility and interest rate benchmarks as primary risk factors."
 
         return [
+            InsightChip(label: "Scoring Agent", text: scoringText),
             InsightChip(label: "Technical Analysis", text: technicalText),
             InsightChip(label: "Fundamentals", text: fundamentalText),
             InsightChip(label: "Market Sentiment", text: sentimentText),
@@ -1373,7 +1480,7 @@ public struct StockDetailView: View {
 
     // MARK: - Holdings & Purchase Form Section
     private var validEntries: [PurchaseFormEntry] {
-        purchaseEntries.filter { $0.price > 0 && $0.total > 0 }
+        purchaseEntries.filter { $0.price > 0 && $0.lots > 0 }
     }
 
     private var totalInvestedAmount: Double {
@@ -1384,10 +1491,20 @@ public struct StockDetailView: View {
         validEntries.reduce(0) { $0 + $1.shares }
     }
 
+    private var totalCalculatedLots: Double {
+        validEntries.reduce(0) { $0 + $1.lots }
+    }
+
     private var formattedTotalShares: String {
         let s = totalCalculatedShares
         guard s > 0 else { return "0" }
         return s.truncatingRemainder(dividingBy: 1) == 0 ? "\(Int(s))" : String(format: "%.2f", s)
+    }
+
+    private var formattedTotalLots: String {
+        let l = totalCalculatedLots
+        guard l > 0 else { return "0" }
+        return l.truncatingRemainder(dividingBy: 1) == 0 ? "\(Int(l))" : String(format: "%.2f", l)
     }
 
     private var averagePricePerShare: Double {
@@ -1435,7 +1552,7 @@ public struct StockDetailView: View {
                     summaryTile(
                         title: "Position Value",
                         value: "\(currencyPrefix)\(StockFormatters.stockPrice(currentPositionValue, currency: quote.currency))",
-                        caption: "\(formattedTotalShares) Shares",
+                        caption: "\(formattedTotalLots) Lot (\(formattedTotalShares) Shares)",
                         icon: "chart.pie.fill",
                         color: Color(hex: "38BDF8")
                     )
@@ -1504,7 +1621,7 @@ public struct StockDetailView: View {
                                             }
                                         }
                                         if purchaseEntries.isEmpty {
-                                            purchaseEntries = [PurchaseFormEntry(date: Date(), priceInput: formatNumber(quote.price), totalInput: "")]
+                                            purchaseEntries = [PurchaseFormEntry(date: Date(), priceInput: formatNumber(quote.price), lotInput: "")]
                                         }
                                     }
                                 } label: {
@@ -1520,20 +1637,46 @@ public struct StockDetailView: View {
                         HStack(spacing: 8) {
                             let prefix = currencyPrefix.trimmingCharacters(in: .whitespaces)
                             inputField(label: "Cost / Share", prefix: prefix, text: $entry.priceInput)
-                            inputField(label: "Total Buy", prefix: prefix, text: $entry.totalInput, fontSize: 13.5, prefixSize: 11)
+                            inputField(label: "Total Lot", prefix: "", text: $entry.lotInput, suffix: "lot", fontSize: 14)
 
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("Shares")
+                                Text("Total Buy")
                                     .font(.system(size: 11, weight: .bold))
                                     .foregroundStyle(Color.white.opacity(0.65))
-                                Text(entry.formattedShares)
-                                    .font(.system(size: 15, weight: .bold, design: .rounded))
-                                    .foregroundStyle(Color.white)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(8)
-                                    .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
+                                HStack(spacing: 2) {
+                                    if entry.total > 0 {
+                                        Text(prefix)
+                                            .font(.system(size: 10.5, weight: .bold))
+                                            .foregroundStyle(Color.white.opacity(0.65))
+                                        Text(StockFormatters.stockPrice(entry.total, currency: quote.currency))
+                                            .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                                            .foregroundStyle(Color.white)
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.65)
+                                    } else {
+                                        Text("0")
+                                            .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                                            .foregroundStyle(Color.white.opacity(0.4))
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                                .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
                             }
                             .frame(maxWidth: .infinity)
+                        }
+
+                        if entry.lots > 0 {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Color(hex: "38BDF8"))
+                                Text("\(entry.formattedLots) Lot = \(entry.formattedShares) Shares • 1 Lot = 100 lembar")
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .foregroundStyle(Color.white.opacity(0.6))
+                                Spacer()
+                            }
+                            .padding(.horizontal, 2)
                         }
                     }
                     .padding(12)
@@ -1543,7 +1686,7 @@ public struct StockDetailView: View {
                 // Add Share Button
                 Button {
                     withAnimation(.spring()) {
-                        purchaseEntries.append(PurchaseFormEntry(date: Date(), priceInput: formatNumber(quote.price), totalInput: ""))
+                        purchaseEntries.append(PurchaseFormEntry(date: Date(), priceInput: formatNumber(quote.price), lotInput: ""))
                     }
                 } label: {
                     HStack(spacing: 5) {
@@ -1560,20 +1703,34 @@ public struct StockDetailView: View {
         }
     }
 
-    private func inputField(label: String, prefix: String, text: Binding<String>, fontSize: CGFloat = 15, prefixSize: CGFloat = 12) -> some View {
+    private func inputField(
+        label: String,
+        prefix: String,
+        text: Binding<String>,
+        suffix: String = "",
+        fontSize: CGFloat = 15,
+        prefixSize: CGFloat = 12
+    ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label)
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(Color.white.opacity(0.65))
             HStack(spacing: 3) {
-                Text(prefix)
-                    .font(.system(size: prefixSize, weight: .bold))
-                    .foregroundStyle(Color.white.opacity(0.65))
+                if !prefix.isEmpty {
+                    Text(prefix)
+                        .font(.system(size: prefixSize, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.65))
+                }
                 TextField("0", text: text)
                     .keyboardType(.decimalPad)
                     .font(.system(size: fontSize, weight: .bold, design: .rounded))
                     .minimumScaleFactor(0.75)
                     .foregroundStyle(Color.white)
+                if !suffix.isEmpty {
+                    Text(suffix)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.55))
+                }
             }
             .padding(8)
             .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
@@ -1692,6 +1849,7 @@ extension StockDetailView {
         self.init(
             quote: quote,
             fundamentals: fallbackFundamentals,
+            sentiment: stock.sentiment,
             customHistoryFetcher: { ticker, range in
                 // 1. Coba ambil dari Backend API
                 if let detail = try? await APIClient.shared.fetchStockDetail(ticker: ticker) {

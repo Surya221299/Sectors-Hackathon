@@ -46,7 +46,7 @@ enum DS { // Design Size
     static let avatarS:  CGFloat = 42
     static let sparkW:   CGFloat = 70
     static let sparkH:   CGFloat = 34
-    static let sentBarW: CGFloat = 110
+    static let sentBarW: CGFloat = 108
     static let sentBarH: CGFloat = 5
 }
 
@@ -54,33 +54,51 @@ enum DS { // Design Size
 // ║  2.  MODELS (lightweight, self-contained)                      ║
 // ╚══════════════════════════════════════════════════════════════════╝
 
-enum SentimentType: String {
-    case recommended = "Recommended"
-    case neutral     = "Neutral"
-    case caution     = "Caution"
+public enum SentimentType: String, Sendable {
+    case buy  = "Recommended"
+    case hold = "Neutral"
+    case sell = "Caution"
 
-    var sfSymbol: String {
+    public var sfSymbol: String {
         switch self {
-        case .recommended: return "checkmark.circle.fill"
-        case .neutral:     return "exclamationmark.triangle.fill"
-        case .caution:     return "xmark.circle.fill"
+        case .buy:  return "checkmark.circle.fill"
+        case .hold: return "minus.circle.fill"
+        case .sell: return "xmark.circle.fill"
         }
     }
-    var color: Color {
+    public var color: Color {
         switch self {
-        case .recommended: return .ProfitGreen
-        case .neutral:     return .AccentGold
-        case .caution:     return .LossRed
+        case .buy:  return .ProfitGreen
+        case .hold: return .AccentGold
+        case .sell: return .LossRed
         }
     }
 }
 
-struct Sentiment: Hashable {
-    let buy: Double; let hold: Double; let sell: Double; let score: Double
-    var type: SentimentType {
-        if score >= 70 { return .recommended }
-        if score <= 40 { return .caution }
-        return .neutral
+public struct Sentiment: Hashable, Sendable {
+    public let buy: Double
+    public let hold: Double
+    public let sell: Double
+    public let score: Double
+    public var recommendation: String? = nil
+
+    public init(buy: Double, hold: Double, sell: Double, score: Double, recommendation: String? = nil) {
+        self.buy = buy
+        self.hold = hold
+        self.sell = sell
+        self.score = score
+        self.recommendation = recommendation
+    }
+
+    public var type: SentimentType {
+        if let rec = recommendation?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
+            if rec.contains("BUY") || rec.contains("RECOMMENDED") { return .buy }
+            if rec.contains("SELL") || rec.contains("CAUTION") { return .sell }
+            if rec.contains("HOLD") || rec.contains("NEUTRAL") { return .hold }
+        }
+        if score >= 65.0 { return .buy }
+        if score <= 40.0 { return .sell }
+        return .hold
     }
 }
 
@@ -155,12 +173,25 @@ private func formatPrice(_ value: Double, market: String) -> String {
 
 // MARK: - StockAvatarView
 
-struct StockAvatarView: View {
-    let symbol: String
-    let name: String
+public struct StockAvatarView: View {
+    public let symbol: String
+    public let name: String
+    public var size: CGFloat
+
+    public init(symbol: String, name: String = "", size: CGFloat = 42) {
+        self.symbol = symbol
+        self.name = name.isEmpty ? symbol : name
+        self.size = size
+    }
+
     private var colors: [Color] {
-        let hash = abs(symbol.hashValue)
-        return Color.avatarGradientPalette[hash % Color.avatarGradientPalette.count]
+        let palette = Color.avatarGradientPalette
+        guard !palette.isEmpty else {
+            return [.purple, .indigo]
+        }
+        let hash = symbol.utf8.reduce(0) { (acc, b) in (acc &* 31) &+ Int(b) }
+        let idx = abs(hash % palette.count)
+        return palette[idx]
     }
     private var initials: String {
         if symbol.allSatisfy({ $0.isNumber }) {
@@ -172,13 +203,13 @@ struct StockAvatarView: View {
         }
         return String(symbol.prefix(2)).uppercased()
     }
-    var body: some View {
+    public var body: some View {
         Circle()
             .fill(LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing))
-            .frame(width: DS.avatarS, height: DS.avatarS)
+            .frame(width: size, height: size)
             .overlay(
                 Text(initials)
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .font(.system(size: max(10, size * 0.33), weight: .bold, design: .rounded))
                     .foregroundColor(.white)
             )
             .shadow(color: .black.opacity(0.15), radius: 3, x: 0, y: 1)
@@ -187,20 +218,32 @@ struct StockAvatarView: View {
 
 // MARK: - SentimentPillView
 
-struct SentimentPillView: View {
-    let sentiment: Sentiment
-    var body: some View {
+public struct SentimentPillView: View {
+    public let sentiment: Sentiment
+    public var isLarge: Bool
+
+    public init(sentiment: Sentiment, isLarge: Bool = false) {
+        self.sentiment = sentiment
+        self.isLarge = isLarge
+    }
+
+    public var body: some View {
         let t = sentiment.type
-        HStack(spacing: 3) {
+        HStack(spacing: isLarge ? 5 : 3) {
             Image(systemName: t.sfSymbol)
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: isLarge ? 12 : 9, weight: isLarge ? .bold : .semibold))
             Text(t.rawValue)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: isLarge ? 13 : 10, weight: isLarge ? .bold : .semibold, design: .rounded))
         }
-        .padding(.horizontal, 6).padding(.vertical, 2)
-        .background(t.color.opacity(0.15))
+        .padding(.horizontal, isLarge ? 11 : 6)
+        .padding(.vertical, isLarge ? 5 : 2)
+        .background(t.color.opacity(isLarge ? 0.18 : 0.15))
         .foregroundColor(t.color)
         .clipShape(Capsule())
+        .overlay(
+            Capsule()
+                .strokeBorder(t.color.opacity(isLarge ? 0.38 : 0.0), lineWidth: isLarge ? 1 : 0)
+        )
     }
 }
 
@@ -209,14 +252,38 @@ struct SentimentPillView: View {
 struct SentimentBarView: View {
     let sentiment: Sentiment
     private var color: Color { sentiment.type.color }
+    private var scoreText: String {
+        let score = sentiment.score
+        if score.isNaN || score.isInfinite {
+            return "--"
+        }
+        if score.truncatingRemainder(dividingBy: 1) == 0 {
+            return String(format: "%.0f", score)
+        } else {
+            return String(format: "%.1f", score)
+        }
+    }
+
     var body: some View {
-        ZStack(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 3)
-                .fill(Color.white.opacity(0.15))
-                .frame(width: DS.sentBarW, height: DS.sentBarH)
-            RoundedRectangle(cornerRadius: 3)
-                .fill(color)
-                .frame(width: DS.sentBarW * CGFloat(sentiment.score / 100), height: DS.sentBarH)
+        let rawScore = sentiment.score
+        let validRatio: CGFloat = (rawScore.isNaN || rawScore.isInfinite) ? 0.0 : CGFloat(max(0.0, min(100.0, rawScore)) / 100.0)
+        let fillWidth = max(0, min(DS.sentBarW, DS.sentBarW * validRatio))
+
+        HStack(spacing: 6) {
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.white.opacity(0.15))
+                    .frame(width: DS.sentBarW, height: DS.sentBarH)
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(color)
+                    .frame(
+                        width: fillWidth,
+                        height: DS.sentBarH
+                    )
+            }
+            Text(scoreText)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundColor(color)
         }
     }
 }
@@ -290,7 +357,7 @@ struct StockRowView: View {
     var body: some View {
         HStack(spacing: 8) {
             StockAvatarView(symbol: stock.symbol, name: stock.name)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(stock.symbol).font(.system(size: 15, weight: .bold)).foregroundColor(.white)
                     SentimentPillView(sentiment: stock.sentiment)
@@ -300,7 +367,6 @@ struct StockRowView: View {
                     .foregroundColor(.white.opacity(0.65))
                     .lineLimit(1)
                 SentimentBarView(sentiment: stock.sentiment)
-                    .frame(width: DS.sentBarW, alignment: .leading)
             }
             .layoutPriority(1)
             Spacer(minLength: 0)
@@ -663,7 +729,7 @@ struct AIInsightCardView: View {
     @State private var isPulsing:     Bool     = false
     @State private var wordIndex:     Int      = 0
     @State private var targetWords:   [String] = []
-    @State private var timer:         Timer?   = nil
+    @State private var typingTask:    Task<Void, Never>? = nil
     @State private var isExpanded:    Bool     = false
     @State private var showReadMore:     Bool     = false
     @State private var hasStarted:       Bool     = false
@@ -840,11 +906,15 @@ struct AIInsightCardView: View {
                 startTyping(text: newText)
             }
         }
-        .onDisappear { timer?.invalidate(); timer = nil }
+        .onDisappear {
+            typingTask?.cancel()
+            typingTask = nil
+        }
     }
 
     private func displayInstant(text: String) {
-        timer?.invalidate(); timer = nil
+        typingTask?.cancel()
+        typingTask = nil
         targetWords = text.components(separatedBy: " ")
         wordIndex = targetWords.count
         showReadMore = targetWords.count > 45
@@ -852,30 +922,28 @@ struct AIInsightCardView: View {
     }
 
     private func startTyping(text: String) {
-        timer?.invalidate(); timer = nil
-        showReadMore = false; isExpanded = false
+        typingTask?.cancel()
+        typingTask = nil
+        showReadMore = false
+        isExpanded = false
         isFinishedTyping = false
-        targetWords = text.components(separatedBy: " ")
+        let words = text.components(separatedBy: " ")
+        targetWords = words
         wordIndex = 0
-        timer = Timer.scheduledTimer(withTimeInterval: 0.07, repeats: true) { t in
-            if wordIndex < targetWords.count {
-                wordIndex += 1
-                if wordIndex >= 45 && !showReadMore {
-                    DispatchQueue.main.async {
-                        withAnimation(.easeIn(duration: 0.3)) { showReadMore = true }
-                    }
+
+        typingTask = Task { @MainActor in
+            for i in 1...words.count {
+                try? await Task.sleep(nanoseconds: 70_000_000)
+                if Task.isCancelled { return }
+                wordIndex = i
+                if i >= 45 && !showReadMore {
+                    withAnimation(.easeIn(duration: 0.3)) { showReadMore = true }
                 }
-            } else {
-                if !showReadMore {
-                    DispatchQueue.main.async {
-                        withAnimation(.easeIn(duration: 0.3)) { showReadMore = true }
-                    }
-                }
-                DispatchQueue.main.async {
-                    withAnimation(.easeInOut(duration: 0.25)) { isFinishedTyping = true }
-                }
-                t.invalidate(); timer = nil
             }
+            if !showReadMore {
+                withAnimation(.easeIn(duration: 0.3)) { showReadMore = true }
+            }
+            withAnimation(.easeInOut(duration: 0.25)) { isFinishedTyping = true }
         }
     }
 
@@ -1065,12 +1133,14 @@ struct InvelioLogoView: View {
 
 // MARK: - StockDetailCache (Fast In-Memory Cache for Stock Detail & Chart)
 
-@MainActor
-final class StockDetailCache {
+final class StockDetailCache: @unchecked Sendable {
     static let shared = StockDetailCache()
+    private let lock = NSLock()
     private var cache: [String: (detail: BackendStockDetail, points: [StockHistoryPoint], date: Date)] = [:]
 
     func get(ticker: String) -> (detail: BackendStockDetail, points: [StockHistoryPoint])? {
+        lock.lock()
+        defer { lock.unlock() }
         let clean = ticker.components(separatedBy: ".").first?.uppercased() ?? ticker.uppercased()
         if let entry = cache[clean], Date().timeIntervalSince(entry.date) < 300 {
             return (entry.detail, entry.points)
@@ -1079,6 +1149,8 @@ final class StockDetailCache {
     }
 
     func set(ticker: String, detail: BackendStockDetail) {
+        lock.lock()
+        defer { lock.unlock() }
         let clean = ticker.components(separatedBy: ".").first?.uppercased() ?? ticker.uppercased()
         let pts = detail.toHistoryPoints()
         cache[clean] = (detail, pts, Date())

@@ -6,7 +6,7 @@ actor APIClient {
 
     #if DEBUG
     #if targetEnvironment(simulator)
-    private let baseURL = URL(string: "http://192.168.0.133:8000/api")!
+    private let baseURL = URL(string: "http://10.67.48.94:8000/api")!
     #else
     private let baseURL = URL(string: "http://0.0.0.0:8000/api")!
     #endif
