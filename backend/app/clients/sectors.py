@@ -26,7 +26,7 @@ SCREENER_FIELDS = (
 )
 SUBSECTOR_SECTIONS = ("statistics", "market_cap")
 REPORT_SECTIONS = ("overview", "valuation")
-HISTORY_DAYS = 90
+HISTORY_DAYS = 365
 NEWS_DAYS = 30
 FILINGS_DAYS = 90
 LIST_LIMIT = 30
@@ -132,8 +132,11 @@ class SectorsClient:
 
     # --- Price / Trending data ---
 
-    async def get_daily_prices(self, ticker: str) -> Any:
-        return await self._get(f"/daily/{bare_symbol(ticker)}/", {"start": _history_start()})
+    async def get_daily_prices(self, ticker: str, days: int = 90) -> Any:
+        return await self._get(
+            f"/daily/{bare_symbol(ticker)}/",
+            {"start": _days_ago(days)},
+        )
 
     async def get_most_traded(self) -> Any:
         return await self._get("/most-traded/", {"n_stock": TOP_N})

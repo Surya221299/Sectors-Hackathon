@@ -34,6 +34,10 @@ struct PortfolioView: View {
         let totalShares: Double
         let totalInvested: Double
 
+        var totalLots: Double {
+            totalShares / 100.0
+        }
+
         var marketValue: Double {
             totalShares * currentPrice
         }
@@ -158,6 +162,8 @@ struct PortfolioView: View {
     private var summaryCard: some View {
         PortfolioSummaryCardView(
             summary: dynamicSummary,
+            holdingLots: holdingLots,
+            stockItems: allStockItems,
             title: "Total Portfolio",
             horizontalPadding: 0,
             showChart: true
@@ -225,7 +231,7 @@ struct PortfolioView: View {
                     .foregroundStyle(Color.white.opacity(0.6))
                     .lineLimit(1)
 
-                Text(String(format: "%@ Shares • Avg %@%@", formatShares(pos.totalShares), prefix, StockFormatters.stockPrice(pos.averageCost, currency: pos.currency)))
+                Text(String(format: "%@ Lot (%@ Shares) • Avg %@%@", formatLots(pos.totalLots), formatShares(pos.totalShares), prefix, StockFormatters.stockPrice(pos.averageCost, currency: pos.currency)))
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color.white.opacity(0.5))
             }
@@ -318,6 +324,10 @@ struct PortfolioView: View {
     }
 
     private func formatShares(_ val: Double) -> String {
+        val.truncatingRemainder(dividingBy: 1) == 0 ? "\(Int(val))" : String(format: "%.2f", val)
+    }
+
+    private func formatLots(_ val: Double) -> String {
         val.truncatingRemainder(dividingBy: 1) == 0 ? "\(Int(val))" : String(format: "%.2f", val)
     }
 }

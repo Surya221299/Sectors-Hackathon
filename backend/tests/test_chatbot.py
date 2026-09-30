@@ -7,7 +7,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.agents.chatbot import ChatbotAgent, ChatState, _guard_mcp_args, _truncate
+from app.agents.chatbot import (
+    MCP_TOOL_WHITELIST,
+    ChatbotAgent,
+    ChatState,
+    _build_rest_tools,
+    _guard_mcp_args,
+    _mcp_cache_key,
+    _truncate,
+    _wrap_mcp_tool,
+    _wrap_mcp_tool_cached,
+)
 
 # -- Unit: _truncate ---------------------------------------------------------
 
@@ -205,3 +215,105 @@ def test_guard_passes_tools_without_ticker():
     result = _guard_mcp_args("get-subsectors", {"some_param": "value"})
     assert isinstance(result, dict)
     assert result["some_param"] == "value"
+
+
+def test_guard_foreign_flow_allows_ihsg_and_tracked():
+    res_bbca = _guard_mcp_args("fetch-foreign-flow", {"symbol": "bbca"})
+    assert isinstance(res_bbca, dict)
+    assert res_bbca["symbol"] == "BBCA.JK"
+
+    res_ihsg = _guard_mcp_args("fetch-foreign-flow", {"symbol": "IHSG"})
+    assert isinstance(res_ihsg, dict)
+    assert res_ihsg["symbol"] == "IHSG"
+
+
+def test_mcp_cache_keys_coverage():
+    # Documentation and server runtime tool names
+    assert _mcp_cache_key("fetch-daily-transaction", {"symbol": "BBCA"}) == (
+        "daily_prices:BBCA",
+        300,
+    )
+    assert _mcp_cache_key("fetch-daily-price", {"symbol": "BBCA"}) == ("daily_prices:BBCA", 300)
+    assert _mcp_cache_key("fetch-companies-by-subsector", {}) == ("companies_list", 300)
+    assert _mcp_cache_key("fetch-companies", {}) == ("companies_list", 300)
+    assert _mcp_cache_key("get-subsectors", {}) == ("subsectors", 3600)
+    assert _mcp_cache_key("fetch-subsectors", {}) == ("subsectors", 3600)
+    assert _mcp_cache_key("fetch-foreign-flow", {"symbol": "BBCA"}) == ("foreign_flow:BBCA", 3600)
+    assert _mcp_cache_key("fetch-idx-market-cap", {}) == ("idx_total", 600)
+    assert _mcp_cache_key("fetch-corporate-actions", {"symbol": "BBCA"}) == (
+        "corporate_actions:BBCA",
+        86400,
+    )
+
+
+def test_rest_tools_contain_foreign_flow_and_market_cap():
+    mock_client = MagicMock()
+    tools = _build_rest_tools(mock_client)
+    tool_names = {t.name for t in tools}
+    assert "get_foreign_flow" in tool_names
+    assert "get_idx_market_cap" in tool_names
+    assert "get_company_report" in tool_names
+
+
+def test_mcp_tool_whitelist_coverage():
+    expected_tools = {
+        "fetch-daily-transaction",
+        "fetch-daily-price",
+        "fetch-companies-by-subsector",
+        "fetch-companies",
+        "get-subsectors",
+        "fetch-subsectors",
+        "fetch-foreign-flow",
+        "fetch-idx-market-cap",
+        "fetch-corporate-actions",
+        "fetch-quarterly-financials",
+        "fetch-shareholders-composition",
+    }
+    assert expected_tools.issubset(MCP_TOOL_WHITELIST)
+    assert "fetch-daily-close" not in MCP_TOOL_WHITELIST
+
+
+@pytest.mark.asyncio
+async def test_wrap_mcp_tool_normalizes_and_rejects():
+    mock_original = MagicMock()
+    mock_original.name = "fetch-company-report"
+    mock_original.description = "Test company report"
+    mock_original.args_schema = None
+    mock_original.ainvoke = AsyncMock(return_value='{"data": "ok"}')
+
+    wrapped = _wrap_mcp_tool(mock_original)
+    assert wrapped.name == "fetch-company-report"
+
+    # Tracked ticker is normalized and forwarded
+    res = await wrapped.ainvoke({"symbol": "bbca"})
+    assert res == '{"data": "ok"}'
+    mock_original.ainvoke.assert_awaited_once_with(
+        {"symbol": "BBCA.JK", "sections": "overview,valuation"}
+    )
+
+    # Untracked ticker is rejected without calling original
+    mock_original.ainvoke.reset_mock()
+    res_reject = await wrapped.ainvoke({"symbol": "GOTO"})
+    assert "not tracked" in res_reject
+    mock_original.ainvoke.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wrap_mcp_tool_cached_l1_hit():
+    mock_original = MagicMock()
+    mock_original.name = "fetch-foreign-flow"
+    mock_original.description = "Test foreign flow"
+    mock_original.args_schema = None
+    mock_original.ainvoke = AsyncMock(return_value='{"net_foreign": 1000000}')
+
+    wrapped = _wrap_mcp_tool_cached(mock_original, db=None)
+
+    # First call: cache miss, calls original
+    res1 = await wrapped.ainvoke({"symbol": "bbca"})
+    assert "1000000" in str(res1)
+    assert mock_original.ainvoke.call_count == 1
+
+    # Second call: cache hit, original not called again
+    res2 = await wrapped.ainvoke({"symbol": "bbca"})
+    assert "1000000" in str(res2)
+    assert mock_original.ainvoke.call_count == 1

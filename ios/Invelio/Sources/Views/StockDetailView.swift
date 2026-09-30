@@ -123,6 +123,7 @@ public enum StockTimeRange: String, CaseIterable, Sendable {
     case oneWeek    = "1W"
     case oneMonth   = "1M"
     case threeMonth = "3M"
+    case oneYear    = "1Y"
 
     public var isIntraday: Bool {
         false
@@ -133,28 +134,31 @@ public struct PurchaseFormEntry: Identifiable, Equatable {
     public let id: UUID
     public var date: Date
     public var priceInput: String
-    public var totalInput: String
+    public var lotInput: String
 
-    public init(id: UUID = UUID(), date: Date = Date(), priceInput: String = "", totalInput: String = "") {
+    public init(id: UUID = UUID(), date: Date = Date(), priceInput: String = "", lotInput: String = "") {
         self.id = id
         self.date = date
         self.priceInput = priceInput
-        self.totalInput = totalInput
+        self.lotInput = lotInput
     }
 
     public var price: Double {
-        let clean = priceInput.replacingOccurrences(of: ",", with: ".").trimmingCharacters(in: .whitespaces)
-        return Double(clean) ?? 0.0
+        StockFormatters.parseCurrencyInput(priceInput)
     }
 
-    public var total: Double {
-        let clean = totalInput.replacingOccurrences(of: ",", with: ".").trimmingCharacters(in: .whitespaces)
-        return Double(clean) ?? 0.0
+    public var lots: Double {
+        StockFormatters.parseCurrencyInput(lotInput)
     }
 
+    /// 1 Lot = 100 Shares (lembar) in Indonesian Stock Exchange (IDX)
     public var shares: Double {
-        guard price > 0, total > 0 else { return 0.0 }
-        return total / price
+        return lots * 100.0
+    }
+
+    /// Total portfolio buy nominal = shares * price per share (e.g. 1 lot * 100 shares * Rp 6.000 = Rp 600.000)
+    public var total: Double {
+        return shares * price
     }
 
     public var formattedShares: String {
@@ -166,6 +170,16 @@ public struct PurchaseFormEntry: Identifiable, Equatable {
             return str.hasSuffix("0") ? String(format: "%.1f", shares) : str
         }
     }
+
+    public var formattedLots: String {
+        guard lots > 0 else { return "0" }
+        if lots.truncatingRemainder(dividingBy: 1) == 0 {
+            return "\(Int(lots))"
+        } else {
+            let str = String(format: "%.2f", lots)
+            return str.hasSuffix("0") ? String(format: "%.1f", lots) : str
+        }
+    }
 }
 
 
@@ -174,6 +188,61 @@ public struct PurchaseFormEntry: Identifiable, Equatable {
 // MARK: - ==========================================
 
 public enum StockFormatters {
+    public static func parseCurrencyInput(_ input: String) -> Double {
+        var s = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        s = s.replacingOccurrences(of: "Rp", with: "", options: .caseInsensitive)
+        s = s.replacingOccurrences(of: "IDR", with: "", options: .caseInsensitive)
+        s = s.replacingOccurrences(of: " ", with: "")
+        guard !s.isEmpty else { return 0.0 }
+
+        if s.contains(".") && s.contains(",") {
+            if let dotIdx = s.lastIndex(of: "."), let commaIdx = s.lastIndex(of: ",") {
+                if dotIdx > commaIdx {
+                    s = s.replacingOccurrences(of: ",", with: "")
+                } else {
+                    s = s.replacingOccurrences(of: ".", with: "")
+                    s = s.replacingOccurrences(of: ",", with: ".")
+                }
+            }
+            return Double(s) ?? 0.0
+        }
+
+        if s.contains(".") {
+            let components = s.split(separator: ".")
+            if components.count > 2 {
+                s = s.replacingOccurrences(of: ".", with: "")
+                return Double(s) ?? 0.0
+            } else if components.count == 2 {
+                let last = components[1]
+                if last.count == 3 {
+                    s = s.replacingOccurrences(of: ".", with: "")
+                    return Double(s) ?? 0.0
+                } else {
+                    return Double(s) ?? 0.0
+                }
+            }
+        }
+
+        if s.contains(",") {
+            let components = s.split(separator: ",")
+            if components.count > 2 {
+                s = s.replacingOccurrences(of: ",", with: "")
+                return Double(s) ?? 0.0
+            } else if components.count == 2 {
+                let last = components[1]
+                if last.count == 3 {
+                    s = s.replacingOccurrences(of: ",", with: "")
+                    return Double(s) ?? 0.0
+                } else {
+                    s = s.replacingOccurrences(of: ",", with: ".")
+                    return Double(s) ?? 0.0
+                }
+            }
+        }
+
+        return Double(s) ?? 0.0
+    }
+
     public static func currencyPrefix(for currency: String = "IDR") -> String {
         return "Rp "
     }
@@ -207,16 +276,67 @@ public enum StockFormatters {
 
     public static func formatScrubDate(_ date: Date) -> String {
         let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US")
-        let calendar = Calendar.current
-        let hour = calendar.component(.hour, from: date)
-        let min = calendar.component(.minute, from: date)
-        if hour == 0 && min == 0 {
-            f.dateFormat = "d MMM yyyy"
-        } else {
-            f.dateFormat = "d MMM yyyy, HH:mm"
-        }
+        f.locale = Locale(identifier: "id_ID")
+        f.timeZone = IDXCalendar.timeZone
+        f.dateFormat = "E, d MMM yyyy"
         return f.string(from: date)
+    }
+}
+
+// MARK: - IDX Bursa Efek Indonesia Trading Calendar Helper
+public enum IDXCalendar {
+    public static var timeZone: TimeZone {
+        TimeZone(identifier: "Asia/Jakarta") ?? .current
+    }
+
+    public static var calendar: Calendar {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        return cal
+    }
+
+    /// Cek apakah suatu tanggal adalah hari bursa aktif (Senin-Jumat, bukan hari libur bursa nasional)
+    public static func isTradingDay(_ date: Date) -> Bool {
+        let cal = calendar
+        let weekday = cal.component(.weekday, from: date)
+        // 1 = Minggu, 7 = Sabtu
+        if weekday == 1 || weekday == 7 { return false }
+
+        // Hari libur nasional tetap bursa Indonesia (BEI)
+        let month = cal.component(.month, from: date)
+        let day = cal.component(.day, from: date)
+        if month == 1 && day == 1 { return false }   // Tahun Baru
+        if month == 5 && day == 1 { return false }   // Hari Buruh
+        if month == 6 && day == 1 { return false }   // Hari Lahir Pancasila
+        if month == 8 && day == 17 { return false }  // HUT RI
+        if month == 12 && day == 25 { return false } // Hari Raya Natal
+
+        return true
+    }
+
+    /// Menghasilkan N hari perdagangan terakhir bursa (hanya hari Senin - Jumat / non-libur)
+    public static func previousTradingDays(count: Int, from referenceDate: Date = Date()) -> [Date] {
+        let cal = calendar
+        var comps = cal.dateComponents([.year, .month, .day], from: referenceDate)
+        comps.hour = 16
+        comps.minute = 0
+        comps.second = 0
+        var cursor = cal.date(from: comps) ?? referenceDate
+
+        // Jika hari referensi adalah libur/weekend, mundur ke hari bursa aktif sebelumnya
+        while !isTradingDay(cursor) {
+            cursor = cal.date(byAdding: .day, value: -1, to: cursor) ?? cursor
+        }
+
+        var result: [Date] = []
+        var d = cursor
+        while result.count < count {
+            if isTradingDay(d) {
+                result.append(d)
+            }
+            d = cal.date(byAdding: .day, value: -1, to: d) ?? d
+        }
+        return result.reversed()
     }
 }
 
@@ -230,6 +350,8 @@ fileprivate extension Color {
         let b = Double(rgbValue & 0x0000FF) / 255.0
         self.init(red: r, green: g, blue: b)
     }
+
+    static let capsuleProfitGreen = Color(red: 0.0, green: 0.78, blue: 0.58)
 }
 
 
@@ -250,6 +372,14 @@ public final class StockDetailViewModel: ObservableObject {
     public init(quote: StockQuote, fetcher: ((String, StockTimeRange) async throws -> [StockHistoryPoint])? = nil) {
         self.quote = quote
         self.customHistoryFetcher = fetcher
+
+        // Check if preloaded in StockDetailCache
+        if let cached = StockDetailCache.shared.get(ticker: quote.ticker), !cached.points.isEmpty {
+            self.allHistoricalPoints = cached.points
+            let tradingPoints = cached.points.filter { IDXCalendar.isTradingDay($0.date) }
+            self.dataPoints = Array(tradingPoints.suffix(5))
+            self.isLoading = false
+        }
     }
 
     public var minPrice: Double { dataPoints.map(\.price).min() ?? quote.price }
@@ -259,18 +389,22 @@ public final class StockDetailViewModel: ObservableObject {
     public var isPositive: Bool { latestPrice >= startPrice }
 
     public func fetchChartData() async {
-        isLoading = true
-
         // 1. Fetch from FastAPI Backend
         if allHistoricalPoints.isEmpty {
-            do {
-                let detail = try await APIClient.shared.fetchStockDetail(ticker: quote.ticker)
-                let pts = detail.toHistoryPoints()
-                if !pts.isEmpty {
-                    self.allHistoricalPoints = pts
+            if let cached = StockDetailCache.shared.get(ticker: quote.ticker), !cached.points.isEmpty {
+                self.allHistoricalPoints = cached.points
+            } else {
+                isLoading = true
+                do {
+                    let detail = try await APIClient.shared.fetchStockDetail(ticker: quote.ticker)
+                    StockDetailCache.shared.set(ticker: quote.ticker, detail: detail)
+                    let pts = detail.toHistoryPoints()
+                    if !pts.isEmpty {
+                        self.allHistoricalPoints = pts
+                    }
+                } catch {
+                    // Fallback to customHistoryFetcher or synthetic
                 }
-            } catch {
-                // Fallback to customHistoryFetcher or synthetic
             }
         }
 
@@ -299,36 +433,39 @@ public final class StockDetailViewModel: ObservableObject {
     }
 
     private func filterPoints(_ points: [StockHistoryPoint], for range: StockTimeRange) -> [StockHistoryPoint] {
+        let tradingPoints = points.filter { IDXCalendar.isTradingDay($0.date) }
         switch range {
         case .oneWeek:
-            return Array(points.suffix(5))
+            return Array(tradingPoints.suffix(5))
         case .oneMonth:
-            return Array(points.suffix(22))
+            return Array(tradingPoints.suffix(22))
         case .threeMonth:
-            return points
+            return Array(tradingPoints.suffix(66))
+        case .oneYear:
+            return Array(tradingPoints.suffix(250))
         }
     }
 
     private func generateMockPoints(for range: StockTimeRange) -> [StockHistoryPoint] {
-        let (count, interval): (Int, TimeInterval) = {
+        let count: Int = {
             switch range {
-            case .oneWeek:    return (5, 24 * 3600)
-            case .oneMonth:   return (22, 24 * 3600)
-            case .threeMonth: return (66, 24 * 3600)
+            case .oneWeek:    return 5
+            case .oneMonth:   return 22
+            case .threeMonth: return 66
+            case .oneYear:    return 250
             }
         }()
 
-        let now = Date()
+        let dates = IDXCalendar.previousTradingDays(count: count)
         var points: [StockHistoryPoint] = []
         var current = quote.previousClose > 0 ? quote.previousClose : quote.price * 0.98
         let step = max(quote.price * 0.006, 0.05)
 
-        for i in 0..<count {
-            let d = now.addingTimeInterval(-Double(count - 1 - i) * interval)
+        for (i, d) in dates.enumerated() {
             let delta = Double([-2, -1, 0, 1, 2].randomElement() ?? 0) * step
             current = max(quote.price * 0.5, current + delta)
 
-            if i == count - 1 {
+            if i == dates.count - 1 {
                 current = quote.price
             }
 
@@ -485,9 +622,9 @@ public struct StockInteractiveChartView: View {
                         // Green Area (Above start point baseline)
                         MorphingXYAreaShape(data: animatedData, closingY: animatedBaselineY)
                             .fill(LinearGradient(stops: [
-                                .init(color: Color.ProfitGreen.opacity(0.35), location: 0.0),
-                                .init(color: Color.ProfitGreen.opacity(0.15), location: 0.6),
-                                .init(color: Color.ProfitGreen.opacity(0.0),  location: 1.0)
+                                .init(color: Color.capsuleProfitGreen.opacity(0.35), location: 0.0),
+                                .init(color: Color.capsuleProfitGreen.opacity(0.15), location: 0.6),
+                                .init(color: Color.capsuleProfitGreen.opacity(0.0),  location: 1.0)
                             ], startPoint: .top, endPoint: .bottom))
                             .clipShape(AnimatableClipAbove(cutY: animatedBaselineY))
 
@@ -502,7 +639,7 @@ public struct StockInteractiveChartView: View {
 
                         // Green Line (Above start point baseline)
                         MorphingXYLineShape(data: animatedData)
-                            .stroke(Color.ProfitGreen, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+                            .stroke(Color.capsuleProfitGreen, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
                             .clipShape(AnimatableClipAbove(cutY: animatedBaselineY))
 
                         // Red Line (Below start point baseline)
@@ -512,7 +649,7 @@ public struct StockInteractiveChartView: View {
 
                         // End point indicator dot (Latest Price)
                         if !isDragging, let lastPt = animatedData.points.last {
-                            let dotColor = viewModel.latestPrice >= viewModel.startPrice ? Color.ProfitGreen : Color.PortfolioLossRed
+                            let dotColor = viewModel.latestPrice >= viewModel.startPrice ? Color.capsuleProfitGreen : Color.PortfolioLossRed
                             Circle()
                                 .fill(dotColor)
                                 .frame(width: 8, height: 8)
@@ -704,7 +841,7 @@ public struct StockInteractiveChartView: View {
         let y = yPos(for: pt.price, in: size)
 
         let isPositive = pt.price >= viewModel.startPrice
-        let ptColor = isPositive ? Color.ProfitGreen : Color.PortfolioLossRed
+        let ptColor = isPositive ? Color.capsuleProfitGreen : Color.PortfolioLossRed
 
         let labelText = StockFormatters.formatScrubDate(pt.date)
         let labelX = min(max(55, xPos), size.width - 55)
@@ -790,32 +927,106 @@ public struct StockDetailView: View {
 
     public let quote: StockQuote
     public var initialFundamentals: StockFundamentals?
+    public var initialSentiment: Sentiment? = nil
     public var onBuy: ((_ amount: Double, _ pricePerShare: Double) -> Void)?
 
     @State private var liveFundamentals: StockFundamentals? = nil
+    @State private var liveSentiment: Sentiment? = nil
     private var fundamentals: StockFundamentals? {
         liveFundamentals ?? initialFundamentals
+    }
+    private var sentiment: Sentiment {
+        liveSentiment ?? initialSentiment ?? fallbackSentiment
+    }
+
+    static func staticScoringReasoning(for ticker: String) -> String {
+        let bare = ticker.components(separatedBy: ".").first?.uppercased() ?? ticker.uppercased()
+        let reasoningMap: [String: String] = [
+            "BMRI": "BMRI achieves a strong overall score of 70.5, supported by an exceptional fundamental score of 97.6 and a healthy dividend yield of 12.7%. It exhibits a low P/E ratio of 5.62 compared to the sector median P/E of 14.11, alongside a solid risk score of 74.0.",
+            "BBRI": "BBRI presents a compelling profile with an overall score of 70.4 and a high fundamental score of 95.3. It maintains an attractive valuation with a P/E of 7.97 against a sector median P/E of 14.11, coupled with a robust risk score of 77.7 and a 10.5% dividend yield.",
+            "ASII": "ASII holds an overall score of 68.1, driven by a strong fundamental score of 90.3 and a P/E ratio of 6.55, which is favorable compared to the sector median of 12.35. The stock also offers a sound dividend yield of 8.1% and a manageable debt-to-equity ratio of 0.41.",
+            "BBNI": "BBNI earns an overall score of 66.3 and a high sentiment score of 76.2 following a positive 1-month return of 8.96%. It trades at an attractive P/E ratio of 6.48 relative to the sector median P/E of 14.11, backed by a solid risk score of 74.9.",
+            "BBCA": "BBCA records an overall score of 64.5, backed by a high fundamental score of 73.9 and a strong ROE of 21.47%. However, its P/E ratio stands at 13.23 with a P/B ratio of 2.84, reflecting a modest 1-month negative return of 1.95%.",
+            "ANTM": "ANTM posts an overall score of 56.5 with a solid fundamental score of 79.2 and an impressive ROE of 23.1%. Despite a low sector score of 9.7 and a 1-month return of -3.19%, it maintains a reasonable P/E of 9.02 and a low risk score of 69.3.",
+            "TLKM": "TLKM is assigned a HOLD recommendation with an overall score of 56.3 and a fundamental score of 79.6. Despite a generous dividend yield of 8.7%, the stock experienced a 1-month return of -5.19% and a low sector component of 34.4.",
+            "UNVR": "UNVR holds an overall score of 54.0, supported by a strong fundamental score of 80.0 and a notable dividend yield of 12.18%. However, it carries an elevated P/B ratio of 20.82 and a low sector component score of 30.3.",
+            "ICBP": "ICBP shows an overall score of 50.8, accompanied by a moderate fundamental score of 54.6 and a risk score of 72.0. The stock achieved a 1-month return of 5.75% but trades at a P/E ratio of 10.89 compared to a low sector median P/E of 6.17.",
+            "AMRT": "AMRT records an overall score of 47.1, with a fundamental score of 68.1 and a healthy risk score of 73.5. Despite a positive 1-month return of 6.12%, its growth is weighed down by a very weak sector score of 12.7 and a P/E ratio of 15.20."
+        ]
+        if let r = reasoningMap[bare] {
+            return r
+        }
+        return "\(bare) scoring agent evaluates fundamental metrics, sector relative performance, macro conditions, and risk indicators to determine its quantitative investment recommendation."
+    }
+
+    private var fallbackSentiment: Sentiment {
+        let bareTicker = quote.ticker.components(separatedBy: ".").first?.uppercased() ?? quote.ticker.uppercased()
+        let fallbackScoreMap: [String: (score: Double, rec: String)] = [
+            "BMRI": (70.5, "BUY"),
+            "BBRI": (70.4, "BUY"),
+            "ASII": (68.1, "BUY"),
+            "BBNI": (66.3, "BUY"),
+            "BBCA": (64.5, "HOLD"),
+            "ANTM": (56.5, "HOLD"),
+            "TLKM": (56.3, "HOLD"),
+            "UNVR": (54.0, "HOLD"),
+            "ICBP": (50.8, "HOLD"),
+            "AMRT": (47.1, "HOLD")
+        ]
+        if let fb = fallbackScoreMap[bareTicker] {
+            return Sentiment(
+                buy: fb.score >= 65 ? 0.70 : 0.40,
+                hold: fb.score >= 65 ? 0.20 : 0.45,
+                sell: fb.score >= 65 ? 0.10 : 0.15,
+                score: fb.score,
+                recommendation: fb.rec
+            )
+        }
+        return Sentiment(buy: 0.5, hold: 0.3, sell: 0.2, score: 60.0, recommendation: "HOLD")
     }
 
     @StateObject private var viewModel: StockDetailViewModel
     @State private var selectedPoint: StockHistoryPoint? = nil
     @State private var isDragging: Bool = false
-    @State private var isFavorited: Bool = false
 
     // Purchase / Lots management state
     @State private var purchaseEntries: [PurchaseFormEntry] = []
     @State private var cachedAnalysisChips: [InsightChip] = []
+    @State private var activeDatePickerEntryID: UUID? = nil
+    @State private var tempSelectedDate: Date = Date()
 
     public init(
         quote: StockQuote,
         fundamentals: StockFundamentals? = nil,
+        sentiment: Sentiment? = nil,
         customHistoryFetcher: ((String, StockTimeRange) async throws -> [StockHistoryPoint])? = nil,
         onBuy: ((_ amount: Double, _ pricePerShare: Double) -> Void)? = nil
     ) {
         self.quote = quote
         self.initialFundamentals = fundamentals
+        self.initialSentiment = sentiment
         self.onBuy = onBuy
         _viewModel = StateObject(wrappedValue: StockDetailViewModel(quote: quote, fetcher: customHistoryFetcher))
+
+        if let cached = StockDetailCache.shared.get(ticker: quote.ticker) {
+            _liveFundamentals = State(initialValue: cached.detail.toStockFundamentals())
+            if let sent = cached.detail.toSentiment() {
+                _liveSentiment = State(initialValue: sent)
+            }
+            if let serverInsights = cached.detail.insights, !serverInsights.isEmpty {
+                var chips = serverInsights.map {
+                    InsightChip(label: $0.label, text: $0.text)
+                }
+                let bare = quote.ticker.components(separatedBy: ".").first?.uppercased() ?? quote.ticker.uppercased()
+                if let idx = chips.firstIndex(where: { $0.label.lowercased().contains("scoring") }) {
+                    let chip = chips.remove(at: idx)
+                    chips.insert(chip, at: 0)
+                } else {
+                    chips.insert(InsightChip(label: "Scoring Agent", text: StockDetailView.staticScoringReasoning(for: bare)), at: 0)
+                }
+                _cachedAnalysisChips = State(initialValue: chips)
+            }
+        }
     }
 
     private var stockLots: [HoldingLot] {
@@ -863,7 +1074,7 @@ public struct StockDetailView: View {
 
     private var isGain: Bool { currentChange >= 0 }
     private var themeColor: Color {
-        isGain ? Color(red: 0.0, green: 0.78, blue: 0.58) : Color(red: 0.94, green: 0.27, blue: 0.27)
+        isGain ? Color.capsuleProfitGreen : Color(red: 0.94, green: 0.27, blue: 0.27)
     }
 
     public var body: some View {
@@ -890,41 +1101,114 @@ public struct StockDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.6)) {
-                        isFavorited.toggle()
-                    }
-                    let gen = UIImpactFeedbackGenerator(style: .medium)
-                    gen.impactOccurred()
-                } label: {
-                    Image(systemName: isFavorited ? "star.fill" : "star")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(isFavorited ? Color.PrimaryYellow : Color.white.opacity(0.8))
-                }
-            }
-        }
         .task {
             loadExistingHoldings()
             await fetchLiveStockDetail()
+            await fetchLiveStockInsights()
             await viewModel.fetchChartData()
             if cachedAnalysisChips.isEmpty {
                 self.cachedAnalysisChips = stockAnalysisChips
             }
         }
-        .onChange(of: purchaseEntries) { _ in
+        .onChange(of: purchaseEntries) {
             syncHoldingsToSwiftData()
+        }
+        .sheet(isPresented: Binding(
+            get: { activeDatePickerEntryID != nil },
+            set: { if !$0 { activeDatePickerEntryID = nil } }
+        )) {
+            datePickerSheet
         }
     }
 
+    private var datePickerSheet: some View {
+        NavigationStack {
+            VStack(spacing: 20) {
+                DatePicker(
+                    "Purchase Date",
+                    selection: $tempSelectedDate,
+                    in: ...Date(),
+                    displayedComponents: .date
+                )
+                .datePickerStyle(.graphical)
+                .tint(Color.PrimaryYellow)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+
+                Spacer()
+            }
+            .navigationTitle("Purchase Date")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        activeDatePickerEntryID = nil
+                    }
+                    .foregroundColor(.white.opacity(0.7))
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        if let id = activeDatePickerEntryID,
+                           let idx = purchaseEntries.firstIndex(where: { $0.id == id }) {
+                            purchaseEntries[idx].date = tempSelectedDate
+                            syncHoldingsToSwiftData()
+                        }
+                        activeDatePickerEntryID = nil
+                    }
+                    .fontWeight(.bold)
+                    .foregroundColor(Color.PrimaryYellow)
+                }
+            }
+            .background(Color.DarkPurpleAppBackground.ignoresSafeArea())
+            .preferredColorScheme(.dark)
+        }
+        .presentationDetents([.height(450)])
+        .presentationDragIndicator(.visible)
+    }
+
     private func fetchLiveStockDetail() async {
+        if let cached = StockDetailCache.shared.get(ticker: quote.ticker) {
+            await MainActor.run {
+                self.liveFundamentals = cached.detail.toStockFundamentals()
+                if let sent = cached.detail.toSentiment() {
+                    self.liveSentiment = sent
+                }
+                if let serverInsights = cached.detail.insights, !serverInsights.isEmpty {
+                    var chips = serverInsights.map {
+                        InsightChip(label: $0.label, text: $0.text)
+                    }
+                    let bare = quote.ticker.components(separatedBy: ".").first?.uppercased() ?? quote.ticker.uppercased()
+                    if let idx = chips.firstIndex(where: { $0.label.lowercased().contains("scoring") }) {
+                        let chip = chips.remove(at: idx)
+                        chips.insert(chip, at: 0)
+                    } else {
+                        chips.insert(InsightChip(label: "Scoring Agent", text: StockDetailView.staticScoringReasoning(for: bare)), at: 0)
+                    }
+                    self.cachedAnalysisChips = chips
+                }
+            }
+            return
+        }
         do {
             let detail = try await APIClient.shared.fetchStockDetail(ticker: quote.ticker)
+            StockDetailCache.shared.set(ticker: quote.ticker, detail: detail)
             await MainActor.run {
                 self.liveFundamentals = detail.toStockFundamentals()
-                if self.cachedAnalysisChips.isEmpty {
-                    self.cachedAnalysisChips = self.stockAnalysisChips
+                if let sent = detail.toSentiment() {
+                    self.liveSentiment = sent
+                }
+                if let serverInsights = detail.insights, !serverInsights.isEmpty {
+                    var chips = serverInsights.map {
+                        InsightChip(label: $0.label, text: $0.text)
+                    }
+                    let bare = quote.ticker.components(separatedBy: ".").first?.uppercased() ?? quote.ticker.uppercased()
+                    if let idx = chips.firstIndex(where: { $0.label.lowercased().contains("scoring") }) {
+                        let chip = chips.remove(at: idx)
+                        chips.insert(chip, at: 0)
+                    } else {
+                        chips.insert(InsightChip(label: "Scoring Agent", text: StockDetailView.staticScoringReasoning(for: bare)), at: 0)
+                    }
+                    self.cachedAnalysisChips = chips
                 }
             }
         } catch {
@@ -932,15 +1216,43 @@ public struct StockDetailView: View {
         }
     }
 
+    private func fetchLiveStockInsights() async {
+        if !cachedAnalysisChips.isEmpty { return }
+        do {
+            let response = try await APIClient.shared.fetchStockInsights(ticker: quote.ticker)
+            var chips = response.insights.map { InsightChip(label: $0.label, text: $0.text) }
+            if !chips.isEmpty {
+                let bare = quote.ticker.components(separatedBy: ".").first?.uppercased() ?? quote.ticker.uppercased()
+                if let idx = chips.firstIndex(where: { $0.label.lowercased().contains("scoring") }) {
+                    let chip = chips.remove(at: idx)
+                    chips.insert(chip, at: 0)
+                } else {
+                    chips.insert(InsightChip(label: "Scoring Agent", text: StockDetailView.staticScoringReasoning(for: bare)), at: 0)
+                }
+                await MainActor.run {
+                    self.cachedAnalysisChips = chips
+                }
+            }
+        } catch {
+            await MainActor.run {
+                if self.cachedAnalysisChips.isEmpty {
+                    self.cachedAnalysisChips = self.stockAnalysisChips
+                }
+            }
+        }
+    }
+
     private func loadExistingHoldings() {
         let saved = stockLots
         if !saved.isEmpty {
             purchaseEntries = saved.map { lot in
-                PurchaseFormEntry(
+                let calculatedShares = lot.shares > 0 ? lot.shares : (lot.pricePerShare > 0 ? lot.totalInvested / lot.pricePerShare : 0)
+                let lotCount = calculatedShares / 100.0
+                return PurchaseFormEntry(
                     id: lot.id,
                     date: lot.buyDate,
                     priceInput: formatNumber(lot.pricePerShare),
-                    totalInput: formatNumber(lot.totalInvested)
+                    lotInput: formatNumber(lotCount)
                 )
             }
         } else if purchaseEntries.isEmpty {
@@ -948,7 +1260,7 @@ public struct StockDetailView: View {
                 PurchaseFormEntry(
                     date: Date(),
                     priceInput: formatNumber(quote.price),
-                    totalInput: ""
+                    lotInput: ""
                 )
             ]
         }
@@ -964,7 +1276,12 @@ public struct StockDetailView: View {
                 let deletedId = lot.id
                 modelContext.delete(lot)
                 Task {
-                    try? await APIClient.shared.deleteLot(id: deletedId)
+                    do {
+                        try await APIClient.shared.deleteLot(id: deletedId)
+                        print("🗑️ Lot \(deletedId) successfully deleted from PostgreSQL/Supabase")
+                    } catch {
+                        print("⚠️ Note: Lot deleted locally. Server delete error: \(error.localizedDescription)")
+                    }
                 }
             }
         }
@@ -997,27 +1314,38 @@ public struct StockDetailView: View {
             let price = entry.price
             let total = entry.total
             let date = entry.date
-
+            let lotId = entry.id
             Task {
-                _ = try? await APIClient.shared.buyStock(
-                    ticker: ticker,
-                    pricePerShare: price,
-                    shares: shares,
-                    totalInvested: total,
-                    buyDate: date
-                )
+                do {
+                    let res = try await APIClient.shared.buyStock(
+                        id: lotId,
+                        ticker: ticker,
+                        pricePerShare: price,
+                        shares: shares,
+                        totalInvested: total,
+                        buyDate: date
+                    )
+                    print("✅ Holding synced to PostgreSQL/Supabase: \(res.id) - \(res.ticker)")
+                } catch {
+                    print("⚠️ Note: Holding saved locally to SwiftData. Server sync: \(error.localizedDescription)")
+                }
             }
         }
         try? modelContext.save()
     }
 
+
     // MARK: - Header
     private var headerSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(quote.ticker)
-                    .font(.title2.bold())
-                    .foregroundStyle(Color.white)
+                HStack(alignment: .center) {
+                    Text(quote.ticker)
+                        .font(.title2.bold())
+                        .foregroundStyle(Color.white)
+                    Spacer()
+                    SentimentPillView(sentiment: sentiment, isLarge: true)
+                }
                 Text(quote.name)
                     .font(.subheadline)
                     .foregroundStyle(Color.white.opacity(0.65))
@@ -1091,21 +1419,30 @@ public struct StockDetailView: View {
         AIInsightCardView(
             chips: currentAnalysisChips,
             title: "AI Analysis",
-            horizontalPadding: 0
+            horizontalPadding: 0,
+            cardKey: "stock_detail_ai_\(quote.ticker)"
         )
     }
 
     private var currentAnalysisChips: [InsightChip] {
-        if !cachedAnalysisChips.isEmpty {
-            return cachedAnalysisChips
+        var chips = cachedAnalysisChips.isEmpty ? stockAnalysisChips : cachedAnalysisChips
+        if let idx = chips.firstIndex(where: { $0.label.lowercased().contains("scoring") }) {
+            let scoringChip = chips.remove(at: idx)
+            chips.insert(scoringChip, at: 0)
+        } else {
+            let bareTicker = quote.ticker.components(separatedBy: ".").first?.uppercased() ?? quote.ticker.uppercased()
+            let scoringChip = InsightChip(label: "Scoring Agent", text: StockDetailView.staticScoringReasoning(for: bareTicker))
+            chips.insert(scoringChip, at: 0)
         }
-        return stockAnalysisChips
+        return chips
     }
 
     private var stockAnalysisChips: [InsightChip] {
         let isBullish = quote.change >= 0
         let pctStr = String(format: "%.2f", abs(quote.changePercent))
         let formattedPrice = "\(currencyPrefix)\(StockFormatters.stockPrice(quote.price, currency: quote.currency))"
+
+        let scoringText = StockDetailView.staticScoringReasoning(for: quote.ticker)
 
         let technicalText: String
         if isBullish {
@@ -1133,6 +1470,7 @@ public struct StockDetailView: View {
         let outlookText = "Medium-term growth outlook is supported by macroeconomic stability and sector digitization. Monitor macro volatility and interest rate benchmarks as primary risk factors."
 
         return [
+            InsightChip(label: "Scoring Agent", text: scoringText),
             InsightChip(label: "Technical Analysis", text: technicalText),
             InsightChip(label: "Fundamentals", text: fundamentalText),
             InsightChip(label: "Market Sentiment", text: sentimentText),
@@ -1142,7 +1480,7 @@ public struct StockDetailView: View {
 
     // MARK: - Holdings & Purchase Form Section
     private var validEntries: [PurchaseFormEntry] {
-        purchaseEntries.filter { $0.price > 0 && $0.total > 0 }
+        purchaseEntries.filter { $0.price > 0 && $0.lots > 0 }
     }
 
     private var totalInvestedAmount: Double {
@@ -1153,10 +1491,20 @@ public struct StockDetailView: View {
         validEntries.reduce(0) { $0 + $1.shares }
     }
 
+    private var totalCalculatedLots: Double {
+        validEntries.reduce(0) { $0 + $1.lots }
+    }
+
     private var formattedTotalShares: String {
         let s = totalCalculatedShares
         guard s > 0 else { return "0" }
         return s.truncatingRemainder(dividingBy: 1) == 0 ? "\(Int(s))" : String(format: "%.2f", s)
+    }
+
+    private var formattedTotalLots: String {
+        let l = totalCalculatedLots
+        guard l > 0 else { return "0" }
+        return l.truncatingRemainder(dividingBy: 1) == 0 ? "\(Int(l))" : String(format: "%.2f", l)
     }
 
     private var averagePricePerShare: Double {
@@ -1191,10 +1539,10 @@ public struct StockDetailView: View {
                         Text("Saved")
                             .font(.system(size: 11, weight: .semibold))
                     }
-                    .foregroundStyle(Color.ProfitGreen)
+                    .foregroundStyle(Color.capsuleProfitGreen)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
-                    .background(Color.ProfitGreen.opacity(0.12), in: Capsule())
+                    .background(Color.capsuleProfitGreen.opacity(0.12), in: Capsule())
                 }
             }
 
@@ -1204,14 +1552,14 @@ public struct StockDetailView: View {
                     summaryTile(
                         title: "Position Value",
                         value: "\(currencyPrefix)\(StockFormatters.stockPrice(currentPositionValue, currency: quote.currency))",
-                        caption: "\(formattedTotalShares) Shares",
+                        caption: "\(formattedTotalLots) Lot (\(formattedTotalShares) Shares)",
                         icon: "chart.pie.fill",
                         color: Color(hex: "38BDF8")
                     )
 
                     let isProfit = currentPnL >= 0
                     let sign = isProfit ? "+" : "-"
-                    let pColor = isProfit ? Color.ProfitGreen : Color.PortfolioLossRed
+                    let pColor = isProfit ? Color.capsuleProfitGreen : Color.PortfolioLossRed
 
                     summaryTile(
                         title: "Total G&L",
@@ -1229,22 +1577,29 @@ public struct StockDetailView: View {
                 ForEach($purchaseEntries) { $entry in
                     VStack(spacing: 10) {
                         HStack {
-                            HStack(spacing: 4) {
-                                Image(systemName: "calendar")
-                                    .font(.system(size: 10, weight: .bold))
-                                Text(formatEntryDate(entry.date))
-                                    .font(.system(size: 10, weight: .semibold))
+                            Button {
+                                if let entryObj = purchaseEntries.first(where: { $0.id == entry.id }) {
+                                    tempSelectedDate = entryObj.date
+                                } else {
+                                    tempSelectedDate = entry.date
+                                }
+                                activeDatePickerEntryID = entry.id
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "calendar")
+                                        .font(.system(size: 11, weight: .bold))
+                                    Text(formatEntryDate(entry.date))
+                                        .font(.system(size: 11, weight: .semibold))
+                                    Image(systemName: "chevron.down")
+                                        .font(.system(size: 8, weight: .bold))
+                                        .opacity(0.75)
+                                }
+                                .foregroundStyle(Color(hex: "38BDF8"))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .background(Color(hex: "38BDF8").opacity(0.16), in: Capsule())
                             }
-                            .foregroundStyle(Color(hex: "38BDF8"))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4.5)
-                            .background(Color(hex: "38BDF8").opacity(0.16), in: Capsule())
-                            .overlay {
-                                DatePicker("", selection: $entry.date, displayedComponents: .date)
-                                    .labelsHidden()
-                                    .blendMode(.destinationOver)
-                                    .opacity(0.015)
-                            }
+                            .buttonStyle(.plain)
 
                             Spacer()
 
@@ -1257,11 +1612,16 @@ public struct StockDetailView: View {
                                             modelContext.delete(existing)
                                             try? modelContext.save()
                                             Task {
-                                                try? await APIClient.shared.deleteLot(id: idToDelete)
+                                                do {
+                                                    try await APIClient.shared.deleteLot(id: idToDelete)
+                                                    print("🗑️ Lot \(idToDelete) successfully deleted from PostgreSQL/Supabase")
+                                                } catch {
+                                                    print("⚠️ Note: Lot deleted locally. Server delete error: \(error.localizedDescription)")
+                                                }
                                             }
                                         }
                                         if purchaseEntries.isEmpty {
-                                            purchaseEntries = [PurchaseFormEntry(date: Date(), priceInput: formatNumber(quote.price), totalInput: "")]
+                                            purchaseEntries = [PurchaseFormEntry(date: Date(), priceInput: formatNumber(quote.price), lotInput: "")]
                                         }
                                     }
                                 } label: {
@@ -1277,20 +1637,46 @@ public struct StockDetailView: View {
                         HStack(spacing: 8) {
                             let prefix = currencyPrefix.trimmingCharacters(in: .whitespaces)
                             inputField(label: "Cost / Share", prefix: prefix, text: $entry.priceInput)
-                            inputField(label: "Total Buy", prefix: prefix, text: $entry.totalInput, fontSize: 13.5, prefixSize: 11)
+                            inputField(label: "Total Lot", prefix: "", text: $entry.lotInput, suffix: "lot", fontSize: 14)
 
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("Shares")
+                                Text("Total Buy")
                                     .font(.system(size: 11, weight: .bold))
                                     .foregroundStyle(Color.white.opacity(0.65))
-                                Text(entry.formattedShares)
-                                    .font(.system(size: 15, weight: .bold, design: .rounded))
-                                    .foregroundStyle(Color.white)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(8)
-                                    .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
+                                HStack(spacing: 2) {
+                                    if entry.total > 0 {
+                                        Text(prefix)
+                                            .font(.system(size: 10.5, weight: .bold))
+                                            .foregroundStyle(Color.white.opacity(0.65))
+                                        Text(StockFormatters.stockPrice(entry.total, currency: quote.currency))
+                                            .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                                            .foregroundStyle(Color.white)
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.65)
+                                    } else {
+                                        Text("0")
+                                            .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                                            .foregroundStyle(Color.white.opacity(0.4))
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                                .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
                             }
                             .frame(maxWidth: .infinity)
+                        }
+
+                        if entry.lots > 0 {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Color(hex: "38BDF8"))
+                                Text("\(entry.formattedLots) Lot = \(entry.formattedShares) Shares • 1 Lot = 100 lembar")
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .foregroundStyle(Color.white.opacity(0.6))
+                                Spacer()
+                            }
+                            .padding(.horizontal, 2)
                         }
                     }
                     .padding(12)
@@ -1300,7 +1686,7 @@ public struct StockDetailView: View {
                 // Add Share Button
                 Button {
                     withAnimation(.spring()) {
-                        purchaseEntries.append(PurchaseFormEntry(date: Date(), priceInput: formatNumber(quote.price), totalInput: ""))
+                        purchaseEntries.append(PurchaseFormEntry(date: Date(), priceInput: formatNumber(quote.price), lotInput: ""))
                     }
                 } label: {
                     HStack(spacing: 5) {
@@ -1317,20 +1703,34 @@ public struct StockDetailView: View {
         }
     }
 
-    private func inputField(label: String, prefix: String, text: Binding<String>, fontSize: CGFloat = 15, prefixSize: CGFloat = 12) -> some View {
+    private func inputField(
+        label: String,
+        prefix: String,
+        text: Binding<String>,
+        suffix: String = "",
+        fontSize: CGFloat = 15,
+        prefixSize: CGFloat = 12
+    ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label)
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(Color.white.opacity(0.65))
             HStack(spacing: 3) {
-                Text(prefix)
-                    .font(.system(size: prefixSize, weight: .bold))
-                    .foregroundStyle(Color.white.opacity(0.65))
+                if !prefix.isEmpty {
+                    Text(prefix)
+                        .font(.system(size: prefixSize, weight: .bold))
+                        .foregroundStyle(Color.white.opacity(0.65))
+                }
                 TextField("0", text: text)
                     .keyboardType(.decimalPad)
                     .font(.system(size: fontSize, weight: .bold, design: .rounded))
                     .minimumScaleFactor(0.75)
                     .foregroundStyle(Color.white)
+                if !suffix.isEmpty {
+                    Text(suffix)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(Color.white.opacity(0.55))
+                }
             }
             .padding(8)
             .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
@@ -1366,11 +1766,6 @@ public struct StockDetailView: View {
         return f.string(from: date)
     }
 
-    private func formatScrubDate(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "d MMM, HH:mm"
-        return f.string(from: date)
-    }
 
     private func formatNumber(_ val: Double) -> String {
         guard val > 0 else { return "" }
@@ -1454,6 +1849,7 @@ extension StockDetailView {
         self.init(
             quote: quote,
             fundamentals: fallbackFundamentals,
+            sentiment: stock.sentiment,
             customHistoryFetcher: { ticker, range in
                 // 1. Coba ambil dari Backend API
                 if let detail = try? await APIClient.shared.fetchStockDetail(ticker: ticker) {

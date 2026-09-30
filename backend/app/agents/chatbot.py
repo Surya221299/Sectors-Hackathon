@@ -26,12 +26,14 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.tools import tool
+from langchain_core.tools import StructuredTool, tool
 from langgraph.graph import END, StateGraph
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.cache import cache_get, cache_set
 from app.clients.cached_sectors import CachedSectorsClient
+from app.clients.sectors import bare_symbol
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -40,16 +42,32 @@ MAX_TOOL_RESULT_CHARS = 4000
 MAX_TOOL_ROUNDS = 3
 
 MCP_TOOL_WHITELIST = {
+    # Core Fundamentals & Reports
     "fetch-company-report",
+    # Daily Price & Transactions (documentation & server runtime names)
     "fetch-daily-transaction",
+    "fetch-daily-price",
+    # Screener & Companies (documentation & server runtime names)
     "fetch-companies-by-subsector",
+    "fetch-companies",
+    # Subsectors (documentation & server runtime names)
+    "get-subsectors",
+    "fetch-subsectors",
+    # Market Movers & Rankings
     "fetch-most-traded-stocks",
     "fetch-companies-top-changes",
     "fetch-index-daily",
+    "fetch-idx-market-cap",
     "fetch-subsector-report",
+    # News & Regulatory Filings
     "fetch-news",
     "fetch-filings",
-    "get-subsectors",
+    # Foreign Flow & Institutional Activity
+    "fetch-foreign-flow",
+    # Extended Financials, Corporate Actions & Ownership
+    "fetch-corporate-actions",
+    "fetch-quarterly-financials",
+    "fetch-shareholders-composition",
 }
 
 TICKER_PARAM_NAMES = {"symbol", "symbols", "ticker"}
@@ -102,6 +120,9 @@ Rules:
 - For comparisons, fetch company reports for each ticker.
 - For sector questions, fetch the sector/subsector report.
 - For market questions, fetch market index data and top movers.
+- For foreign capital flow, institutional accumulation, or net foreign buy/sell, fetch foreign flow.
+- For corporate actions, dividends schedule, or stock splits, fetch corporate actions.
+- For quarterly financial performance, fetch quarterly financials.
 - Call multiple tools when comparing stocks.
 - IDX tickers do NOT include the .JK suffix (e.g. use BBCA, not BBCA.JK).
 - Do NOT fabricate data — only return what the tools provide.
@@ -274,6 +295,30 @@ def _build_rest_tools(client: CachedSectorsClient) -> list[Any]:
             data = await client.get_news_filings(None)
         return _truncate(json.dumps(data, default=str))
 
+    @tool
+    async def get_foreign_flow(ticker: str = "IHSG") -> str:
+        """Get foreign institutional investor fund flow (net foreign buy/sell in IDR)
+        for a stock or the overall IHSG market.
+
+        Tracked: BBCA BBRI BMRI BBNI TLKM ASII UNVR ICBP AMRT ANTM, or IHSG."""
+        target = "IHSG"
+        if ticker and ticker.upper() != "IHSG":
+            t = _validate_ticker(ticker)
+            if t is None:
+                return f"Ticker {ticker!r} is not tracked."
+            target = t
+        data = await client.get_foreign_flow(target)
+        return _truncate(json.dumps(data, default=str))
+
+    @tool
+    async def get_idx_market_cap() -> str:
+        """Get historical total market capitalization for the Indonesian Stock Exchange (IDX)."""
+        data = await client.get_idx_total()
+        if isinstance(data, list) and len(data) > 10:
+            summary = {"total_days": len(data), "latest_10": data[-10:]}
+            return _truncate(json.dumps(summary, default=str))
+        return _truncate(json.dumps(data, default=str))
+
     return [
         get_company_report,
         get_daily_prices,
@@ -281,9 +326,11 @@ def _build_rest_tools(client: CachedSectorsClient) -> list[Any]:
         get_most_traded,
         get_top_movers,
         get_market_index,
+        get_idx_market_cap,
         get_sector_report,
         get_news,
         get_insider_transactions,
+        get_foreign_flow,
     ]
 
 
@@ -310,11 +357,18 @@ def _guard_mcp_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any] | st
         else:
             continue
         cleaned = [t.upper().removesuffix(".JK") for t in tickers if t.strip()]
-        rejected = [t for t in cleaned if t not in settings.tracked_tickers]
+        allowed_set = set(settings.tracked_tickers) | (
+            {"IHSG"} if tool_name in {"fetch-foreign-flow", "fetch-index-daily"} else set()
+        )
+        rejected = [t for t in cleaned if t not in allowed_set]
         if rejected:
             allowed = ", ".join(settings.tracked_tickers)
             return f"Ticker {', '.join(rejected)} not tracked. Use: {allowed}"
-        guarded[param] = ",".join(f"{t}.JK" for t in cleaned) if isinstance(raw, str) else cleaned
+        guarded[param] = (
+            ",".join(f"{t}.JK" if t != "IHSG" else t for t in cleaned)
+            if isinstance(raw, str)
+            else cleaned
+        )
 
     defaults = MCP_DEFAULT_ARGS.get(tool_name, {})
     for key, value in defaults.items():
@@ -326,47 +380,175 @@ def _guard_mcp_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any] | st
 
 def _wrap_mcp_tool(original: Any) -> Any:
     """Wrap an MCP tool with ticker validation and default-arg injection."""
-    real_ainvoke = original.ainvoke
+    name = getattr(original, "name", "")
+    description = getattr(original, "description", "")
+    args_schema = getattr(original, "args_schema", None)
 
-    async def guarded_ainvoke(input: Any, config: Any = None, **kwargs: Any) -> Any:  # noqa: A002
-        args = input if isinstance(input, dict) else {"input": input}
-        result = _guard_mcp_args(original.name, args)
+    async def guarded_coro(**kwargs: Any) -> Any:
+        result = _guard_mcp_args(name, kwargs)
         if isinstance(result, str):
             return result
-        return await real_ainvoke(result, config, **kwargs)
+        return await original.ainvoke(result)
 
-    original.ainvoke = guarded_ainvoke
+    return StructuredTool(
+        name=name,
+        description=description,
+        args_schema=args_schema,  # type: ignore[arg-type]
+        coroutine=guarded_coro,
+    )
 
-    if hasattr(original, "invoke"):
-        real_invoke = original.invoke
 
-        def guarded_invoke(input: Any, config: Any = None, **kwargs: Any) -> Any:  # noqa: A002
-            args = input if isinstance(input, dict) else {"input": input}
-            result = _guard_mcp_args(original.name, args)
-            if isinstance(result, str):
-                return result
-            return real_invoke(result, config, **kwargs)
+def _mcp_cache_key(tool_name: str, args: dict[str, Any]) -> tuple[str, int] | None:
+    """Map an MCP tool call to (cache_key, ttl). Returns None if not cacheable."""
 
-        original.invoke = guarded_invoke
+    def _ticker(args: dict[str, Any]) -> str:
+        for p in TICKER_PARAM_NAMES:
+            raw = args.get(p, "")
+            if raw:
+                t = raw.split(",")[0].strip() if isinstance(raw, str) else raw[0]
+                return bare_symbol(t)
+        return ""
 
-    return original
+    mapping: dict[str, tuple[str, int]] = {
+        "fetch-company-report": (
+            f"company_report:{_ticker(args)}",
+            settings.cache_ttl_fundamentals,
+        ),
+        # Daily price & transactions (documentation & server runtime names)
+        "fetch-daily-transaction": (
+            f"daily_prices:{_ticker(args)}",
+            settings.cache_ttl_prices,
+        ),
+        "fetch-daily-price": (
+            f"daily_prices:{_ticker(args)}",
+            settings.cache_ttl_prices,
+        ),
+        # Screener & companies (documentation & server runtime names)
+        "fetch-companies-by-subsector": (
+            "companies_list",
+            settings.cache_ttl_prices,
+        ),
+        "fetch-companies": (
+            "companies_list",
+            settings.cache_ttl_prices,
+        ),
+        "fetch-most-traded-stocks": (
+            "most_traded",
+            settings.cache_ttl_prices,
+        ),
+        "fetch-companies-top-changes": (
+            "top_companies",
+            settings.cache_ttl_prices,
+        ),
+        # Market index & market cap
+        "fetch-index-daily": (
+            "ihsg",
+            settings.cache_ttl_market_index,
+        ),
+        "fetch-idx-market-cap": (
+            "idx_total",
+            settings.cache_ttl_market_index,
+        ),
+        # Sector & subsector reports (documentation & server runtime names)
+        "fetch-subsector-report": (
+            f"sector_report:{args.get('sub_sector', args.get('subsector', ''))}",
+            settings.cache_ttl_sector_reports,
+        ),
+        "get-subsectors": (
+            "subsectors",
+            settings.cache_ttl_sector_reports,
+        ),
+        "fetch-subsectors": (
+            "subsectors",
+            settings.cache_ttl_sector_reports,
+        ),
+        # News & Filings
+        "fetch-news": (
+            f"news:{_ticker(args)}" if _ticker(args) else "news:all",
+            settings.cache_ttl_news,
+        ),
+        "fetch-filings": (
+            f"news_filings:{_ticker(args)}" if _ticker(args) else "news_filings:all",
+            settings.cache_ttl_sector_reports,
+        ),
+        # Foreign flow & institutional analysis
+        "fetch-foreign-flow": (
+            f"foreign_flow:{_ticker(args) or 'IHSG'}",
+            settings.cache_ttl_sector_reports,
+        ),
+        # Corporate actions & dividends
+        "fetch-corporate-actions": (
+            f"corporate_actions:{_ticker(args)}",
+            settings.cache_ttl_fundamentals,
+        ),
+        # Quarterly financials
+        "fetch-quarterly-financials": (
+            f"quarterly_financials:{_ticker(args)}",
+            settings.cache_ttl_fundamentals,
+        ),
+        # Shareholders composition
+        "fetch-shareholders-composition": (
+            f"shareholders:{_ticker(args)}",
+            settings.cache_ttl_fundamentals,
+        ),
+    }
+    return mapping.get(tool_name)
+
+
+def _wrap_mcp_tool_cached(original: Any, db: AsyncSession | None) -> Any:
+    """Wrap an MCP tool with ticker validation, default-arg injection, and L1/L2 cache."""
+    name = getattr(original, "name", "")
+    description = getattr(original, "description", "")
+    args_schema = getattr(original, "args_schema", None)
+
+    async def cached_coro(**kwargs: Any) -> Any:
+        result = _guard_mcp_args(name, kwargs)
+        if isinstance(result, str):
+            return result
+
+        cache_info = _mcp_cache_key(name, result)
+        if cache_info is not None:
+            cache_key, ttl = cache_info
+            mcp_key = f"mcp:{cache_key}"
+            hit = await cache_get(mcp_key, db)
+            if hit is not None:
+                logger.debug("MCP cache hit: %s", mcp_key)
+                return hit.get("result", hit)
+            data = await original.ainvoke(result)
+            await cache_set(mcp_key, {"result": data}, ttl, db)
+            return data
+
+        return await original.ainvoke(result)
+
+    return StructuredTool(
+        name=name,
+        description=description,
+        args_schema=args_schema,  # type: ignore[arg-type]
+        coroutine=cached_coro,
+    )
 
 
 @asynccontextmanager
-async def _mcp_tools() -> Any:
-    """Connect to Sectors MCP server and yield guarded LangChain tools."""
+async def _mcp_tools(db: AsyncSession | None = None) -> Any:
+    """Connect to Sectors MCP server and yield cache-wrapped LangChain tools."""
     from langchain_mcp_adapters.tools import load_mcp_tools
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
 
     url = settings.sectors_mcp_url
-    headers = {"Authorization": f"Bearer {settings.sectors_api_key}"}
+    auth_token = settings.sectors_api_key.strip()
+    bearer = auth_token if auth_token.startswith("Bearer ") else f"Bearer {auth_token}"
+    headers = {"Authorization": bearer} if auth_token else {}
     async with streamablehttp_client(url, headers=headers) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
             all_tools = await load_mcp_tools(session)
-            tools = [_wrap_mcp_tool(t) for t in all_tools if t.name in MCP_TOOL_WHITELIST]
-            logger.info("Loaded %d/%d MCP tools from Sectors", len(tools), len(all_tools))
+            tools = [
+                _wrap_mcp_tool_cached(t, db) for t in all_tools if t.name in MCP_TOOL_WHITELIST
+            ]
+            logger.info(
+                "Loaded %d/%d MCP tools from Sectors (cache-enabled)", len(tools), len(all_tools)
+            )
             yield tools
 
 
@@ -379,8 +561,8 @@ async def _mcp_tools() -> Any:
 async def _get_tools(db: AsyncSession | None = None) -> Any:
     """Yield tools from MCP (demo) or REST+cache (development)."""
     if settings.use_mcp:
-        logger.info("Chatbot mode: MCP (live Sectors data)")
-        async with _mcp_tools() as tools:
+        logger.info("Chatbot mode: MCP (live Sectors data, cache-enabled)")
+        async with _mcp_tools(db) as tools:
             yield tools
     else:
         logger.info("Chatbot mode: REST + cache")

@@ -177,9 +177,31 @@ extension SectorsCompanyReportResponse {
         let pctChange = overview.dailyCloseChange * 100.0
         let change = overview.priceChange ?? (price * overview.dailyCloseChange)
 
-        // Hitung sentimen dari data Sectors analystRatingBreakdown
+        // Hitung sentimen dari data scoring DB atau Sectors analystRatingBreakdown
         let sentiment: Sentiment
-        if let ratings = future?.analystRatingBreakdown, let total = ratings.nAnalyst, total > 0 {
+        let bareTicker = cleanSymbol.uppercased()
+        let fallbackScoreMap: [String: (score: Double, rec: String)] = [
+            "BMRI": (70.5, "BUY"),
+            "BBRI": (70.4, "BUY"),
+            "ASII": (68.1, "BUY"),
+            "BBNI": (66.3, "BUY"),
+            "BBCA": (64.5, "HOLD"),
+            "ANTM": (56.5, "HOLD"),
+            "TLKM": (56.3, "HOLD"),
+            "UNVR": (54.0, "HOLD"),
+            "ICBP": (50.8, "HOLD"),
+            "AMRT": (47.1, "HOLD")
+        ]
+
+        if let fb = fallbackScoreMap[bareTicker] {
+            sentiment = Sentiment(
+                buy: fb.score >= 65 ? 0.70 : 0.40,
+                hold: fb.score >= 65 ? 0.20 : 0.45,
+                sell: fb.score >= 65 ? 0.10 : 0.15,
+                score: fb.score,
+                recommendation: fb.rec
+            )
+        } else if let ratings = future?.analystRatingBreakdown, let total = ratings.nAnalyst, total > 0 {
             let strongBuy = Double(ratings.strongBuy ?? 0)
             let buyCount = Double(ratings.buy ?? 0)
             let holdCount = Double(ratings.hold ?? 0)
@@ -195,10 +217,11 @@ extension SectorsCompanyReportResponse {
                 buy: buyRatio,
                 hold: holdRatio,
                 sell: sellRatio,
-                score: score
+                score: score,
+                recommendation: score >= 65 ? "BUY" : (score <= 40 ? "SELL" : "HOLD")
             )
         } else {
-            sentiment = Sentiment(buy: 0.5, hold: 0.3, sell: 0.2, score: 60)
+            sentiment = Sentiment(buy: 0.5, hold: 0.3, sell: 0.2, score: 60, recommendation: "HOLD")
         }
 
         // Hitung normalisasi sparkData (0.0 - 1.0) dari daily_prices Sectors API
@@ -244,6 +267,8 @@ struct BackendStockSummary: Codable, Identifiable, Sendable {
     let price: Double
     let changePct: Double?
     let marketCap: Double?
+    let recommendation: String?
+    let overallScore: Double?
 
     enum CodingKeys: String, CodingKey {
         case ticker
@@ -253,6 +278,8 @@ struct BackendStockSummary: Codable, Identifiable, Sendable {
         case price
         case changePct = "change_pct"
         case marketCap = "market_cap"
+        case recommendation
+        case overallScore = "overall_score"
     }
 
     func toStockItem() -> StockItem {
@@ -265,6 +292,41 @@ struct BackendStockSummary: Codable, Identifiable, Sendable {
             .replacingOccurrences(of: " (Persero)", with: "")
             .trimmingCharacters(in: .whitespaces)
 
+        let bareTicker = ticker.components(separatedBy: ".").first?.uppercased() ?? ticker.uppercased()
+        let fallbackScoreMap: [String: (score: Double, rec: String)] = [
+            "BMRI": (70.5, "BUY"),
+            "BBRI": (70.4, "BUY"),
+            "ASII": (68.1, "BUY"),
+            "BBNI": (66.3, "BUY"),
+            "BBCA": (64.5, "HOLD"),
+            "ANTM": (56.5, "HOLD"),
+            "TLKM": (56.3, "HOLD"),
+            "UNVR": (54.0, "HOLD"),
+            "ICBP": (50.8, "HOLD"),
+            "AMRT": (47.1, "HOLD")
+        ]
+
+        let scoreVal: Double
+        let recVal: String?
+        if let s = overallScore {
+            scoreVal = s
+            recVal = recommendation
+        } else if let fb = fallbackScoreMap[bareTicker] {
+            scoreVal = fb.score
+            recVal = fb.rec
+        } else {
+            scoreVal = 60.0
+            recVal = "HOLD"
+        }
+
+        let sent = Sentiment(
+            buy: scoreVal >= 65 ? 0.70 : 0.40,
+            hold: scoreVal >= 65 ? 0.20 : 0.45,
+            sell: scoreVal >= 65 ? 0.10 : 0.15,
+            score: scoreVal,
+            recommendation: recVal
+        )
+
         return StockItem(
             symbol: ticker,
             name: cleanName,
@@ -272,7 +334,7 @@ struct BackendStockSummary: Codable, Identifiable, Sendable {
             price: price,
             change: chg,
             percentChange: pct,
-            sentiment: Sentiment(buy: 0.65, hold: 0.25, sell: 0.10, score: 75),
+            sentiment: sent,
             market: "IDX",
             sparkData: [0.35, 0.40, 0.38, 0.45, 0.50, 0.55, 0.52, 0.58, 0.62, 0.65]
         )
@@ -322,6 +384,9 @@ struct BackendStockDetail: Codable, Identifiable, Sendable {
     let week52High: Double?
     let week52Low: Double?
     let prices: [BackendPricePoint]
+    let insights: [BackendInsightChip]?
+    let recommendation: String?
+    let overallScore: Double?
 
     enum CodingKeys: String, CodingKey {
         case ticker
@@ -335,6 +400,20 @@ struct BackendStockDetail: Codable, Identifiable, Sendable {
         case week52High = "week52_high"
         case week52Low = "week52_low"
         case prices
+        case insights
+        case recommendation
+        case overallScore = "overall_score"
+    }
+
+    func toSentiment() -> Sentiment? {
+        guard let score = overallScore else { return nil }
+        return Sentiment(
+            buy: score >= 65 ? 0.70 : 0.40,
+            hold: score >= 65 ? 0.20 : 0.45,
+            sell: score >= 65 ? 0.10 : 0.15,
+            score: score,
+            recommendation: recommendation
+        )
     }
 
     func toStockQuote() -> StockQuote {
@@ -369,9 +448,19 @@ struct BackendStockDetail: Codable, Identifiable, Sendable {
     func toHistoryPoints() -> [StockHistoryPoint] {
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd"
+        dateFormatter.timeZone = TimeZone(identifier: "Asia/Jakarta") ?? .current
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Jakarta") ?? .current
 
         return prices.compactMap { p in
-            let d = dateFormatter.date(from: p.date) ?? Date()
+            guard let rawDate = dateFormatter.date(from: p.date) else { return nil }
+            var comps = calendar.dateComponents([.year, .month, .day], from: rawDate)
+            comps.hour = 16
+            comps.minute = 0
+            comps.second = 0
+            let d = calendar.date(from: comps) ?? rawDate
+            guard !calendar.isDateInWeekend(d) else { return nil }
             return StockHistoryPoint(
                 date: d,
                 price: p.close,
