@@ -37,3 +37,23 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: true
+
+schemes:
+  Invelio:
+    build:
+      targets:
+        Invelio: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - InvelioTests
+  InvelioTests:
+    build:
+      targets:
+        InvelioTests: all
+    test:
+      config: Debug
+      targets:
+        - InvelioTests
