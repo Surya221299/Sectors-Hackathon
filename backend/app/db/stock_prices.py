@@ -121,9 +121,7 @@ async def sync_daily_prices_for_ticker(
     return await get_db_daily_prices(db, clean)
 
 
-async def sync_all_daily_prices(
-    db: AsyncSession, sectors: CachedSectorsClient
-) -> dict[str, int]:
+async def sync_all_daily_prices(db: AsyncSession, sectors: CachedSectorsClient) -> dict[str, int]:
     """Sync all tracked tickers daily prices into PostgreSQL."""
     results: dict[str, int] = {}
     for ticker in settings.tracked_tickers:

@@ -23,8 +23,12 @@ def test_scheduler_jobs_configured() -> None:
         # Verify alert_job trigger fields (cron at 16:00 WIB Mon-Fri)
         trigger = alert_job.trigger
         # Fields for cron trigger
-        assert any(f.name == "hour" and str(f) == str(settings.alert_scan_hour) for f in trigger.fields)
-        assert any(f.name == "minute" and str(f) == str(settings.alert_scan_minute) for f in trigger.fields)
+        assert any(
+            f.name == "hour" and str(f) == str(settings.alert_scan_hour) for f in trigger.fields
+        )
+        assert any(
+            f.name == "minute" and str(f) == str(settings.alert_scan_minute) for f in trigger.fields
+        )
         assert any(f.name == "day_of_week" and "mon-fri" in str(f).lower() for f in trigger.fields)
 
     stop_scheduler()

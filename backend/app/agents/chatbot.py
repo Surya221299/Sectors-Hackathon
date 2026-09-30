@@ -393,7 +393,7 @@ def _wrap_mcp_tool(original: Any) -> Any:
     return StructuredTool(
         name=name,
         description=description,
-        args_schema=args_schema,
+        args_schema=args_schema,  # type: ignore[arg-type]
         coroutine=guarded_coro,
     )
 
@@ -523,7 +523,7 @@ def _wrap_mcp_tool_cached(original: Any, db: AsyncSession | None) -> Any:
     return StructuredTool(
         name=name,
         description=description,
-        args_schema=args_schema,
+        args_schema=args_schema,  # type: ignore[arg-type]
         coroutine=cached_coro,
     )
 

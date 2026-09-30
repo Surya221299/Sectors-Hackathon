@@ -317,4 +317,3 @@ async def test_wrap_mcp_tool_cached_l1_hit():
     res2 = await wrapped.ainvoke({"symbol": "bbca"})
     assert "1000000" in str(res2)
     assert mock_original.ainvoke.call_count == 1
-

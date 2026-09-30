@@ -32,9 +32,7 @@ def ratio(value: float | None) -> float | None:
     return None if value is None else round(value, 2)
 
 
-def to_summary(
-    row: dict[str, Any], score_info: dict[str, Any] | None = None
-) -> StockSummary:
+def to_summary(row: dict[str, Any], score_info: dict[str, Any] | None = None) -> StockSummary:
     q = row["query_values"]
     ticker = bare_symbol(row["symbol"])
     return StockSummary(
