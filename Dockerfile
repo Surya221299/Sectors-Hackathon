@@ -12,10 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     npm \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY backend/requirements.txt ./requirements.txt
 RUN pip install -r requirements.txt
 
-COPY app ./app
+COPY backend/app ./app
 
 RUN useradd --create-home appuser && chown -R appuser:appuser /app
 USER appuser
