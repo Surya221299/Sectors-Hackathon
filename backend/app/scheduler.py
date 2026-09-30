@@ -1,8 +1,7 @@
-"""Background alert scanner — runs every N minutes during IDX market hours.
+"""Background alert scanner — runs once a day at market close (16:00 WIB, Monday–Friday).
 
 IDX trading sessions: 09:00–16:00 WIB (UTC+7).
-The scheduler fires every `alert_scan_interval_minutes` but skips execution
-outside the configured market-hours window.
+The scheduler fires at market close to scan daily closing anomalies.
 """
 
 from __future__ import annotations
@@ -23,21 +22,29 @@ scheduler = AsyncIOScheduler()
 
 async def _run_alert_scan() -> None:
     now_wib = datetime.now(WIB)
-    hour = now_wib.hour
     weekday = now_wib.weekday()  # 0=Mon … 6=Sun
 
     if weekday >= 5:
         logger.debug("Skipping alert scan — weekend (WIB: %s)", now_wib)
         return
-    if hour < settings.alert_scan_market_open_hour or hour >= settings.alert_scan_market_close_hour:
-        logger.debug("Skipping alert scan — outside market hours (WIB: %s)", now_wib)
-        return
 
-    logger.info("Scheduled alert scan starting (WIB: %s)", now_wib)
+    logger.info("Scheduled market-close alert scan and price sync starting (WIB: %s)", now_wib)
 
     from app.db.database import get_session_factory
 
     async with get_session_factory()() as db:
+        # 1. Sync fresh closing prices into PostgreSQL stock_daily_prices
+        from app.clients.cached_sectors import CachedSectorsClient
+        from app.db.stock_prices import sync_all_daily_prices
+
+        try:
+            sectors = CachedSectorsClient(db)
+            sync_res = await sync_all_daily_prices(db, sectors)
+            logger.info("Market close daily price sync complete: %s", sync_res)
+        except Exception:
+            logger.exception("Market close daily price sync failed")
+
+        # 2. Run market close anomaly alerts scan
         from app.agents.alert import AlertAgent
 
         agent = AlertAgent(db)
@@ -68,10 +75,14 @@ async def _run_daily_stock_insights() -> None:
 
 
 def start_scheduler() -> None:
+    # Cron job: Daily alert scan once a day at market close (16:00 WIB, Mon–Fri)
     scheduler.add_job(
         _run_alert_scan,
-        "interval",
-        minutes=settings.alert_scan_interval_minutes,
+        "cron",
+        day_of_week="mon-fri",
+        hour=settings.alert_scan_hour,
+        minute=settings.alert_scan_minute,
+        timezone=WIB,
         id="alert_scan",
         replace_existing=True,
     )
@@ -87,10 +98,9 @@ def start_scheduler() -> None:
     )
     scheduler.start()
     logger.info(
-        "Scheduler started — alerts every %d min (%02d:00–%02d:00 WIB), AI insights at 06:00 WIB",
-        settings.alert_scan_interval_minutes,
-        settings.alert_scan_market_open_hour,
-        settings.alert_scan_market_close_hour,
+        "Scheduler started — alert scan at %02d:%02d WIB (Mon–Fri), AI insights at 06:00 WIB",
+        settings.alert_scan_hour,
+        settings.alert_scan_minute,
     )
 
 

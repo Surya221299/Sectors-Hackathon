@@ -988,7 +988,6 @@ public struct StockDetailView: View {
     @StateObject private var viewModel: StockDetailViewModel
     @State private var selectedPoint: StockHistoryPoint? = nil
     @State private var isDragging: Bool = false
-    @State private var isFavorited: Bool = false
 
     // Purchase / Lots management state
     @State private var purchaseEntries: [PurchaseFormEntry] = []
@@ -1102,21 +1101,6 @@ public struct StockDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.6)) {
-                        isFavorited.toggle()
-                    }
-                    let gen = UIImpactFeedbackGenerator(style: .medium)
-                    gen.impactOccurred()
-                } label: {
-                    Image(systemName: isFavorited ? "star.fill" : "star")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(isFavorited ? Color.PrimaryYellow : Color.white.opacity(0.8))
-                }
-            }
-        }
         .task {
             loadExistingHoldings()
             await fetchLiveStockDetail()

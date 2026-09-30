@@ -82,6 +82,8 @@ async def get_stock(
     row = next((r for r in rows if bare_symbol(r["symbol"]) == ticker), None)
     if row is None:
         raise HTTPException(status_code=404, detail=f"{ticker} is not tracked")
+    q = row["query_values"]
+    latest_close_date = q.get("latest_close_date")
 
     # Priority 1: Check PostgreSQL `stock_daily_prices` table in database
     db_rows: Any = []
@@ -99,19 +101,28 @@ async def get_stock(
 
     daily: list[dict[str, Any]]
     if db_rows:
-        daily = [
-            {
-                "date": str(r["date"]),
-                "open": float(r["open"]) if r["open"] is not None else None,
-                "high": float(r["high"]) if r["high"] is not None else None,
-                "low": float(r["low"]) if r["low"] is not None else None,
-                "close": float(r["close"]),
-                "volume": int(r["volume"]) if r["volume"] is not None else None,
-            }
-            for r in db_rows
-        ]
+        db_last_date = str(db_rows[-1]["date"])
+        # If DB data is behind the latest close date from the market, auto-sync fresh prices
+        if latest_close_date and db_last_date < str(latest_close_date):
+            from app.db.stock_prices import sync_daily_prices_for_ticker
+
+            daily = await sync_daily_prices_for_ticker(db, sectors, ticker)
+        else:
+            daily = [
+                {
+                    "date": str(r["date"]),
+                    "open": float(r["open"]) if r["open"] is not None else None,
+                    "high": float(r["high"]) if r["high"] is not None else None,
+                    "low": float(r["low"]) if r["low"] is not None else None,
+                    "close": float(r["close"]),
+                    "volume": int(r["volume"]) if r["volume"] is not None else None,
+                }
+                for r in db_rows
+            ]
     else:
-        daily = cast(list[dict[str, Any]], await sectors.get_daily_prices(ticker))
+        from app.db.stock_prices import sync_daily_prices_for_ticker
+
+        daily = await sync_daily_prices_for_ticker(db, sectors, ticker)
 
     scores_list: list[dict[str, Any]] = []
     try:

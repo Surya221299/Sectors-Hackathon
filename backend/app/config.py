@@ -40,7 +40,9 @@ class Settings(BaseSettings):
     # integration testing and demo day.
     use_mock_data: bool = True
 
-    # Alert scheduler
+    # Alert scheduler: runs once a day at market close (default 16:00 WIB, Mon-Fri)
+    alert_scan_hour: int = 16  # 16 WIB = market close
+    alert_scan_minute: int = 0
     alert_scan_interval_minutes: int = 30
     alert_scan_market_open_hour: int = 9  # WIB (UTC+7)
     alert_scan_market_close_hour: int = 16  # 16 WIB = covers post-close settlement
