@@ -18,8 +18,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_16.app
+      - name: Xcode info
+        run: |
+          xcode-select -p
+          xcodebuild -version
 
       - name: Install XcodeGen
         run: brew install xcodegen
