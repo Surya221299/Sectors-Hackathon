@@ -7,11 +7,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.config import settings
 from app.agents.chatbot import (
     MCP_TOOL_WHITELIST,
     ChatbotAgent,
     ChatState,
+    _build_internal_tools,
     _build_rest_tools,
+    _get_tools,
     _guard_mcp_args,
     _mcp_cache_key,
     _truncate,
@@ -182,7 +185,7 @@ def test_guard_passes_tracked_ticker():
     result = _guard_mcp_args("fetch-company-report", {"symbol": "BBCA.JK"})
     assert isinstance(result, dict)
     assert result["symbol"] == "BBCA.JK"
-    assert result["sections"] == "overview,valuation"
+    assert result["sections"] == ["overview", "valuation"]
 
 
 def test_guard_rejects_untracked_ticker():
@@ -194,14 +197,14 @@ def test_guard_rejects_untracked_ticker():
 def test_guard_injects_defaults():
     result = _guard_mcp_args("fetch-companies-top-changes", {})
     assert isinstance(result, dict)
-    assert result["periods"] == "1d"
+    assert result["periods"] == ["1d"]
     assert result["n_stock"] == 5
 
 
 def test_guard_does_not_override_explicit_args():
     result = _guard_mcp_args("fetch-companies-top-changes", {"periods": "7d", "n_stock": 3})
     assert isinstance(result, dict)
-    assert result["periods"] == "7d"
+    assert result["periods"] == ["7d"]
     assert result["n_stock"] == 3
 
 
@@ -288,7 +291,7 @@ async def test_wrap_mcp_tool_normalizes_and_rejects():
     res = await wrapped.ainvoke({"symbol": "bbca"})
     assert res == '{"data": "ok"}'
     mock_original.ainvoke.assert_awaited_once_with(
-        {"symbol": "BBCA.JK", "sections": "overview,valuation"}
+        {"symbol": "BBCA.JK", "sections": ["overview", "valuation"]}
     )
 
     # Untracked ticker is rejected without calling original
@@ -317,3 +320,171 @@ async def test_wrap_mcp_tool_cached_l1_hit():
     res2 = await wrapped.ainvoke({"symbol": "bbca"})
     assert "1000000" in str(res2)
     assert mock_original.ainvoke.call_count == 1
+
+
+# -- Unit: Internal Tools (Portfolio & Recommendations) ----------------------
+
+
+@pytest.mark.asyncio
+async def test_internal_tools_portfolio_without_db_or_device():
+    tools = _build_internal_tools(db=None, device_id=None)
+    tool_map = {t.name: t for t in tools}
+    assert "get_my_portfolio" in tool_map
+    assert "get_top_recommended_stocks" in tool_map
+
+    res = await tool_map["get_my_portfolio"].ainvoke({})
+    assert "No portfolio data available" in res
+
+
+@pytest.mark.asyncio
+async def test_internal_tools_portfolio_empty():
+    mock_db = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.fetchall.return_value = []
+    mock_db.execute.return_value = mock_result
+
+    tools = _build_internal_tools(db=mock_db, device_id="device-123")
+    tool_map = {t.name: t for t in tools}
+
+    res = await tool_map["get_my_portfolio"].ainvoke({})
+    assert "empty (0 stocks held)" in res
+
+
+@pytest.mark.asyncio
+async def test_internal_tools_portfolio_with_holdings():
+    mock_db = AsyncMock()
+    lot1 = MagicMock(
+        ticker="BBCA",
+        stock_name="PT Bank Central Asia Tbk.",
+        shares=100.0,
+        price_per_share=8000.0,
+        total_invested=800000.0,
+    )
+    lot2 = MagicMock(
+        ticker="BBCA",
+        stock_name="PT Bank Central Asia Tbk.",
+        shares=100.0,
+        price_per_share=9000.0,
+        total_invested=900000.0,
+    )
+    lot3 = MagicMock(
+        ticker="TLKM",
+        stock_name="Telkom",
+        shares=500.0,
+        price_per_share=2500.0,
+        total_invested=1250000.0,
+    )
+    mock_result = MagicMock()
+    mock_result.fetchall.return_value = [lot1, lot2, lot3]
+    mock_db.execute.return_value = mock_result
+
+    tools = _build_internal_tools(db=mock_db, device_id="device-123")
+    tool_map = {t.name: t for t in tools}
+
+    res_str = await tool_map["get_my_portfolio"].ainvoke({})
+    parsed = json.loads(res_str)
+    holdings = parsed["portfolio_holdings"]
+    assert len(holdings) == 2
+
+    bbca = next(h for h in holdings if h["ticker"] == "BBCA")
+    assert bbca["total_shares"] == 200.0
+    assert bbca["avg_buy_price"] == 8500.0
+    assert bbca["total_invested_idr"] == 1700000.0
+    assert bbca["lots_count"] == 2
+
+    tlkm = next(h for h in holdings if h["ticker"] == "TLKM")
+    assert tlkm["total_shares"] == 500.0
+
+
+@pytest.mark.asyncio
+async def test_internal_tools_recommendations_with_scores():
+    mock_db = AsyncMock()
+    sample_scores = [
+        {
+            "ticker": "BBCA",
+            "name": "Bank Central Asia",
+            "overall_score": 88.5,
+            "recommendation": "BUY",
+            "reasoning": "Strong ROE and healthy loan growth.",
+            "fundamental_score": 90.0,
+            "macro_score": 85.0,
+            "sector_score": 88.0,
+            "risk_score": 85.0,
+            "sentiment_score": 82.0,
+        },
+        {
+            "ticker": "BBRI",
+            "name": "Bank Rakyat Indonesia",
+            "overall_score": 84.0,
+            "recommendation": "BUY",
+            "reasoning": "High dividend yield and micro credit expansion.",
+            "fundamental_score": 85.0,
+            "macro_score": 80.0,
+            "sector_score": 85.0,
+            "risk_score": 80.0,
+            "sentiment_score": 86.0,
+        },
+        {
+            "ticker": "BMRI",
+            "name": "Bank Mandiri",
+            "overall_score": 81.0,
+            "recommendation": "BUY",
+            "reasoning": "Solid corporate loan book.",
+            "fundamental_score": 82.0,
+            "macro_score": 79.0,
+            "sector_score": 82.0,
+            "risk_score": 78.0,
+            "sentiment_score": 80.0,
+        },
+        {
+            "ticker": "TLKM",
+            "name": "Telkom Indonesia",
+            "overall_score": 75.0,
+            "recommendation": "HOLD",
+            "reasoning": "Data center growth offset by mobile competition.",
+            "fundamental_score": 78.0,
+            "macro_score": 70.0,
+            "sector_score": 75.0,
+            "risk_score": 76.0,
+            "sentiment_score": 72.0,
+        },
+    ]
+
+    with patch("app.db.scores.latest_scores", AsyncMock(return_value=sample_scores)):
+        tools = _build_internal_tools(db=mock_db, device_id="device-123")
+        tool_map = {t.name: t for t in tools}
+
+        res_str = await tool_map["get_top_recommended_stocks"].ainvoke({})
+        parsed = json.loads(res_str)
+        top = parsed["top_recommendations"]
+        # Exactly top 3
+        assert len(top) == 3
+        assert top[0]["ticker"] == "BBCA"
+        assert top[0]["rank"] == 1
+        assert top[0]["recommendation"] == "BUY"
+        assert top[1]["ticker"] == "BBRI"
+        assert top[2]["ticker"] == "BMRI"
+
+
+@pytest.mark.asyncio
+async def test_get_tools_combines_internal_and_rest(monkeypatch):
+    monkeypatch.setattr(settings, "use_mcp", False)
+    async with _get_tools(db=None, device_id="dev-1") as tools:
+        names = {t.name for t in tools}
+        assert "get_my_portfolio" in names
+        assert "get_top_recommended_stocks" in names
+        assert "get_company_report" in names
+        assert "get_daily_prices" in names
+        assert "get_foreign_flow" in names
+
+
+@pytest.mark.asyncio
+async def test_get_tools_combines_internal_and_mcp(monkeypatch):
+    monkeypatch.setattr(settings, "use_mcp", True)
+    async with _get_tools(db=None, device_id="dev-1") as tools:
+        names = {t.name for t in tools}
+        assert "get_my_portfolio" in names
+        assert "get_top_recommended_stocks" in names
+        assert "fetch-company-report" in names
+        assert "fetch-daily-price" in names
+
