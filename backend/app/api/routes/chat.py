@@ -7,7 +7,7 @@ import logging
 import uuid
 from collections.abc import AsyncGenerator
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -99,10 +99,12 @@ def _require_llm_key() -> None:
 async def chat(
     request: ChatRequest,
     db: AsyncSession | None = Depends(_get_optional_db),
+    x_device_id: str | None = Header(default=None, alias="X-Device-Id"),
 ) -> ChatResponse:
     """Send a message and receive a complete JSON response."""
     _require_llm_key()
-    agent = ChatbotAgent(db)
+    device_id = getattr(request, "device_id", None) or x_device_id
+    agent = ChatbotAgent(db, device_id=device_id)
     history = await _load_history(db, request.session_id)
     await _save_message(db, request.session_id, "user", request.message)
 
@@ -126,10 +128,12 @@ async def chat(
 async def chat_stream(
     request: ChatRequest,
     db: AsyncSession | None = Depends(_get_optional_db),
+    x_device_id: str | None = Header(default=None, alias="X-Device-Id"),
 ) -> StreamingResponse:
     """Send a message and receive a streaming SSE response."""
     _require_llm_key()
-    agent = ChatbotAgent(db)
+    device_id = getattr(request, "device_id", None) or x_device_id
+    agent = ChatbotAgent(db, device_id=device_id)
     history = await _load_history(db, request.session_id)
     await _save_message(db, request.session_id, "user", request.message)
 

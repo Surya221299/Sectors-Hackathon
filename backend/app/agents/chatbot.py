@@ -29,6 +29,7 @@ from langchain_core.messages import (
 from langchain_core.tools import StructuredTool, tool
 from langgraph.graph import END, StateGraph
 from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cache import cache_get, cache_set
@@ -73,8 +74,8 @@ MCP_TOOL_WHITELIST = {
 TICKER_PARAM_NAMES = {"symbol", "symbols", "ticker"}
 
 MCP_DEFAULT_ARGS: dict[str, dict[str, Any]] = {
-    "fetch-company-report": {"sections": "overview,valuation"},
-    "fetch-companies-top-changes": {"periods": "1d", "n_stock": 5},
+    "fetch-company-report": {"sections": ["overview", "valuation"]},
+    "fetch-companies-top-changes": {"periods": ["1d"], "n_stock": 5},
 }
 
 
@@ -100,6 +101,11 @@ CLASSIFY_PROMPT = """\
 You are a financial question classifier for Indonesian stock market (IDX) analysis.
 
 Classify the user's message into one of these types:
+- portfolio: About the user's stock portfolio, holdings, portfolio risk, or stock outlook
+  without a ticker specified (e.g. "My Stock Outlook", "My portfolio Risks",
+  "Why Did My Stock Move?", "What stocks do I have in my portfolio?")
+- recommendation: About recommended stocks, top picks, scoring rankings, or best stocks to buy
+  (e.g. "Recommended Stocks", "Top 3 stocks", "What stocks do you recommend?")
 - single_stock: About a specific stock (e.g. "How is BBCA performing?")
 - comparison: Comparing two or more stocks (e.g. "Compare BBCA vs BMRI")
 - sector: About a sector/industry (e.g. "How is the banking sector?")
@@ -113,9 +119,16 @@ Respond ONLY with valid JSON:
 
 RETRIEVAL_PROMPT = """\
 You are a data retrieval agent for Indonesian stock market analysis.
-Use the available tools to fetch the Sectors data needed to answer the user's question.
+Use the available tools to fetch the Sectors data and internal app data needed to answer.
 
 Rules:
+- For portfolio questions (e.g. "My Stock Outlook", "My portfolio Risks"):
+  1. Call get_my_portfolio to retrieve the user's current holdings and average buy price.
+  2. If the user owns stocks, call get_company_report, get_daily_prices, or get_news for those
+     held tickers so you can evaluate their performance, outlook, and risk.
+- For recommendation questions (e.g. "Recommended Stocks", "Top stocks"):
+  1. Call get_top_recommended_stocks to get the top 3 AI-scored stocks from the database.
+  2. You may also fetch sector reports or market movers if helpful.
 - For single stock questions, fetch the company report and optionally news.
 - For comparisons, fetch company reports for each ticker.
 - For sector questions, fetch the sector/subsector report.
@@ -133,18 +146,28 @@ Detected tickers: {entities}"""
 RESPONSE_PROMPT = """\
 You are Invelio, an AI financial assistant for the Indonesian stock market (IDX).
 
-Your answers MUST be grounded in the retrieved Sectors data below.
+Your answers MUST be grounded in the retrieved data below.
 Never fabricate financial numbers. If the data is insufficient, say so.
 
 Guidelines:
 - Be concise and informative (2-4 paragraphs)
+- For portfolio queries:
+  - If the user has holdings, summarize their positions (ticker, shares, average price) and
+    analyze their outlook and risks based on the retrieved market data.
+  - If the user's portfolio is empty, inform them warmly that their portfolio currently has no
+    tracked holdings, and invite them to add stocks in the Portfolio tab.
+- For recommendations queries:
+  - Present the Top 3 AI recommendations clearly with their rank, ticker, company name,
+    overall score, recommendation status (BUY/HOLD/SELL), and key reasoning.
+  - Explain that recommendations are powered by Invelio's multi-factor model
+    (Fundamental 30%, Macro 15%, Sector 20%, Risk 15%, Sentiment 20%).
 - Use actual numbers from the data (prices, ratios, percentages)
 - Format currency as Indonesian Rupiah (e.g. Rp 8,450)
 - Present data objectively — do not give explicit buy/sell financial advice
-- Reference the data source (e.g. "Based on the latest Sectors data...")
+- Reference the data source (e.g. "Based on Invelio's AI scoring engine and Sectors market data...")
 - For comparisons, use a structured format
 
-## Retrieved Sectors Data
+## Retrieved Data
 {context}"""
 
 
@@ -335,6 +358,118 @@ def _build_rest_tools(client: CachedSectorsClient) -> list[Any]:
 
 
 # ---------------------------------------------------------------------------
+# Internal Database Tools (Portfolio & AI Recommendations)
+# ---------------------------------------------------------------------------
+
+
+def _build_internal_tools(db: AsyncSession | None, device_id: str | None) -> list[Any]:
+    @tool
+    async def get_my_portfolio() -> str:
+        """Get the user's current stock portfolio holdings (tickers, stock names, total shares,
+        average buy price, and total invested) for this device from the database.
+        Use this when the user asks about 'my stock', 'my portfolio', or portfolio risk/outlook."""
+        if db is None or not device_id:
+            return "No portfolio data available (database session or device ID not available)."
+        try:
+            rows = await db.execute(
+                text(
+                    "SELECT ticker, stock_name, shares, price_per_share, total_invested, buy_date "
+                    "FROM user_holdings WHERE device_id = :device ORDER BY ticker, buy_date ASC"
+                ),
+                {"device": device_id},
+            )
+            records = rows.fetchall()
+            if not records:
+                return (
+                    "User's portfolio is currently empty (0 stocks held). "
+                    "The user has not added any holdings yet."
+                )
+
+            holdings_map: dict[str, dict[str, Any]] = {}
+            for r in records:
+                ticker = r.ticker
+                shares = float(r.shares)
+                total_invested = float(r.total_invested)
+                if ticker not in holdings_map:
+                    holdings_map[ticker] = {
+                        "ticker": ticker,
+                        "stock_name": r.stock_name,
+                        "total_shares": 0.0,
+                        "total_invested": 0.0,
+                        "lots_count": 0,
+                    }
+                holdings_map[ticker]["total_shares"] += shares
+                holdings_map[ticker]["total_invested"] += total_invested
+                holdings_map[ticker]["lots_count"] += 1
+
+            summary = []
+            for h in holdings_map.values():
+                avg_price = (
+                    round(h["total_invested"] / h["total_shares"], 2)
+                    if h["total_shares"] > 0
+                    else 0.0
+                )
+                summary.append(
+                    {
+                        "ticker": h["ticker"],
+                        "stock_name": h["stock_name"],
+                        "total_shares": h["total_shares"],
+                        "avg_buy_price": avg_price,
+                        "total_invested_idr": round(h["total_invested"], 2),
+                        "lots_count": h["lots_count"],
+                    }
+                )
+            return _truncate(json.dumps({"portfolio_holdings": summary}, default=str))
+        except Exception as exc:
+            logger.warning("Failed to fetch user portfolio: %s", exc)
+            return f"Error retrieving user portfolio: {exc}"
+
+    @tool
+    async def get_top_recommended_stocks() -> str:
+        """Get the top 3 AI-recommended Indonesian stocks from the database scoring engine.
+        Returns rank, ticker, company name, overall score (0-100), recommendation (BUY/HOLD/SELL),
+        component scores, and analytical reasoning.
+        Use this when the user asks for 'recommended stocks', 'top picks', or 'best stocks'."""
+        if db is None:
+            return "Recommendations unavailable (database not connected)."
+        try:
+            from app.db.scores import latest_scores
+
+            rows = await latest_scores(db)
+            if not rows:
+                return (
+                    "No stock recommendations available yet in the database. "
+                    "The scoring agent has not produced any scores."
+                )
+
+            top3 = []
+            for idx, r in enumerate(rows[:3]):
+                top3.append(
+                    {
+                        "rank": idx + 1,
+                        "ticker": r.get("ticker"),
+                        "name": r.get("name"),
+                        "overall_score": r.get("overall_score"),
+                        "recommendation": r.get("recommendation"),
+                        "reasoning": r.get("reasoning"),
+                        "scores": {
+                            "fundamental": r.get("fundamental_score"),
+                            "macro": r.get("macro_score"),
+                            "sector": r.get("sector_score"),
+                            "risk": r.get("risk_score"),
+                            "sentiment": r.get("sentiment_score"),
+                        },
+                    }
+                )
+            return _truncate(json.dumps({"top_recommendations": top3}, default=str))
+        except Exception as exc:
+            logger.warning("Failed to fetch recommended stocks: %s", exc)
+            return f"Error retrieving recommendations: {exc}"
+
+    return [get_my_portfolio, get_top_recommended_stocks]
+
+
+# ---------------------------------------------------------------------------
 # MCP tools — connects to hosted Sectors MCP server (demo mode)
 # ---------------------------------------------------------------------------
 
@@ -374,6 +509,13 @@ def _guard_mcp_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any] | st
     for key, value in defaults.items():
         if key not in guarded:
             guarded[key] = value
+
+    if tool_name == "fetch-company-report" and "sections" in guarded:
+        if isinstance(guarded["sections"], str):
+            guarded["sections"] = [s.strip() for s in guarded["sections"].split(",") if s.strip()]
+    if tool_name == "fetch-companies-top-changes" and "periods" in guarded:
+        if isinstance(guarded["periods"], str):
+            guarded["periods"] = [p.strip() for p in guarded["periods"].split(",") if p.strip()]
 
     return guarded
 
@@ -515,7 +657,9 @@ def _wrap_mcp_tool_cached(original: Any, db: AsyncSession | None) -> Any:
                 logger.debug("MCP cache hit: %s", mcp_key)
                 return hit.get("result", hit)
             data = await original.ainvoke(result)
-            await cache_set(mcp_key, {"result": data}, ttl, db)
+            data_str = str(data).lower()
+            if "validation error" not in data_str and "invalid arguments" not in data_str and "error" not in data_str[:100]:
+                await cache_set(mcp_key, {"result": data}, ttl, db)
             return data
 
         return await original.ainvoke(result)
@@ -558,16 +702,18 @@ async def _mcp_tools(db: AsyncSession | None = None) -> Any:
 
 
 @asynccontextmanager
-async def _get_tools(db: AsyncSession | None = None) -> Any:
-    """Yield tools from MCP (demo) or REST+cache (development)."""
+async def _get_tools(db: AsyncSession | None = None, device_id: str | None = None) -> Any:
+    """Yield tools from MCP (demo) or REST+cache (development), along with internal DB tools."""
+    internal_tools = _build_internal_tools(db, device_id)
     if settings.use_mcp:
         logger.info("Chatbot mode: MCP (live Sectors data, cache-enabled)")
         async with _mcp_tools(db) as tools:
-            yield tools
+            yield internal_tools + tools
     else:
         logger.info("Chatbot mode: REST + cache")
         client = CachedSectorsClient(db)
-        yield _build_rest_tools(client)
+        rest_tools = _build_rest_tools(client)
+        yield internal_tools + rest_tools
 
 
 # ---------------------------------------------------------------------------
@@ -584,8 +730,9 @@ class ChatbotAgent:
       3. generate_response  — produce a grounded answer from retrieved data
     """
 
-    def __init__(self, db: AsyncSession | None = None) -> None:
+    def __init__(self, db: AsyncSession | None = None, device_id: str | None = None) -> None:
         self._db = db
+        self._device_id = device_id
         self._tools: list[Any] = []
         self._tool_map: dict[str, Any] = {}
 
@@ -693,7 +840,7 @@ class ChatbotAgent:
 
     async def run(self, message: str, history: list[dict[str, str]] | None = None) -> str:
         """Execute the full pipeline and return the complete response."""
-        async with _get_tools(self._db) as tools:
+        async with _get_tools(self._db, self._device_id) as tools:
             self._tools = tools
             self._tool_map = {t.name: t for t in tools}
             graph = self._build_graph()
@@ -712,7 +859,7 @@ class ChatbotAgent:
         self, message: str, history: list[dict[str, str]] | None = None
     ) -> AsyncIterator[str]:
         """Run classify + retrieve, then stream the final response tokens."""
-        async with _get_tools(self._db) as tools:
+        async with _get_tools(self._db, self._device_id) as tools:
             self._tools = tools
             self._tool_map = {t.name: t for t in tools}
 

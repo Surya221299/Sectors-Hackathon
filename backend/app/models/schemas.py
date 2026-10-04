@@ -111,6 +111,7 @@ class MarketOverview(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     session_id: uuid.UUID = Field(default_factory=uuid.uuid4)
+    device_id: str | None = None
 
 
 class ChatResponse(BaseModel):
