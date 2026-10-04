@@ -363,7 +363,8 @@ fileprivate extension Color {
 public final class StockDetailViewModel: ObservableObject {
     @Published public private(set) var dataPoints: [StockHistoryPoint] = []
     @Published public var selectedRange: StockTimeRange = .oneWeek
-    @Published public private(set) var isLoading: Bool = false
+    @Published public private(set) var isLoading: Bool = true
+    @Published public private(set) var hasLoaded: Bool = false
 
     public let quote: StockQuote
     public var customHistoryFetcher: ((String, StockTimeRange) async throws -> [StockHistoryPoint])?
@@ -379,6 +380,10 @@ public final class StockDetailViewModel: ObservableObject {
             let tradingPoints = cached.points.filter { IDXCalendar.isTradingDay($0.date) }
             self.dataPoints = Array(tradingPoints.suffix(5))
             self.isLoading = false
+            self.hasLoaded = true
+        } else {
+            self.isLoading = true
+            self.hasLoaded = false
         }
     }
 
@@ -389,12 +394,19 @@ public final class StockDetailViewModel: ObservableObject {
     public var isPositive: Bool { latestPrice >= startPrice }
 
     public func fetchChartData() async {
+        if !hasLoaded {
+            isLoading = true
+        }
+        defer {
+            self.isLoading = false
+            self.hasLoaded = true
+        }
+
         // 1. Fetch from FastAPI Backend
         if allHistoricalPoints.isEmpty {
             if let cached = StockDetailCache.shared.get(ticker: quote.ticker), !cached.points.isEmpty {
                 self.allHistoricalPoints = cached.points
             } else {
-                isLoading = true
                 do {
                     let detail = try await APIClient.shared.fetchStockDetail(ticker: quote.ticker)
                     StockDetailCache.shared.set(ticker: quote.ticker, detail: detail)
@@ -410,7 +422,6 @@ public final class StockDetailViewModel: ObservableObject {
 
         if !allHistoricalPoints.isEmpty {
             self.dataPoints = filterPoints(allHistoricalPoints, for: selectedRange)
-            self.isLoading = false
             return
         }
 
@@ -419,7 +430,6 @@ public final class StockDetailViewModel: ObservableObject {
                 let pts = try await fetcher(quote.ticker, selectedRange)
                 if !pts.isEmpty {
                     self.dataPoints = pts
-                    self.isLoading = false
                     return
                 }
             } catch {
@@ -429,7 +439,6 @@ public final class StockDetailViewModel: ObservableObject {
 
         // Realistic Fallback Data Generation
         self.dataPoints = generateMockPoints(for: selectedRange)
-        self.isLoading = false
     }
 
     private func filterPoints(_ points: [StockHistoryPoint], for range: StockTimeRange) -> [StockHistoryPoint] {
@@ -505,6 +514,7 @@ public struct AnimatableChartData: VectorArithmetic, Equatable, Sendable {
 
     public static func + (lhs: Self, rhs: Self) -> Self {
         let n = max(lhs.points.count, rhs.points.count)
+        guard n > 0 else { return .zero }
         let lp = lhs.padded(to: n); let rp = rhs.padded(to: n)
         var result: [MorphPoint] = []; result.reserveCapacity(n)
         for i in 0..<n { result.append(lp[i] + rp[i]) }
@@ -513,15 +523,22 @@ public struct AnimatableChartData: VectorArithmetic, Equatable, Sendable {
 
     public static func - (lhs: Self, rhs: Self) -> Self {
         let n = max(lhs.points.count, rhs.points.count)
+        guard n > 0 else { return .zero }
         let lp = lhs.padded(to: n); let rp = rhs.padded(to: n)
         var result: [MorphPoint] = []; result.reserveCapacity(n)
         for i in 0..<n { result.append(lp[i] - rp[i]) }
         return .init(points: result)
     }
 
-    public mutating func scale(by rhs: Double) { for i in points.indices { points[i].scale(by: rhs) } }
+    public mutating func scale(by rhs: Double) {
+        guard !rhs.isNaN, !rhs.isInfinite else { return }
+        for i in points.indices { points[i].scale(by: rhs) }
+    }
 
-    public var magnitudeSquared: Double { points.reduce(0) { $0 + $1.magnitudeSquared } }
+    public var magnitudeSquared: Double {
+        let sum = points.reduce(0.0) { $0 + $1.magnitudeSquared }
+        return sum.isFinite ? sum : 0.0
+    }
 
     private func padded(to count: Int) -> [MorphPoint] {
         guard let last = points.last else { return Array(repeating: .zero, count: count) }
@@ -537,9 +554,12 @@ public struct MorphingXYLineShape: Shape {
     public var animatableData: AnimatableChartData { get { data } set { data = newValue } }
 
     public func path(in rect: CGRect) -> Path {
-        let pts = data.points; guard pts.count > 1 else { return Path() }
+        let pts = data.points
+        guard pts.count > 1 else { return Path() }
+        guard !pts[0].x.isNaN, !pts[0].y.isNaN else { return Path() }
         var path = Path(); path.move(to: CGPoint(x: pts[0].x, y: pts[0].y))
         for i in 1..<pts.count {
+            guard !pts[i].x.isNaN, !pts[i].y.isNaN else { continue }
             path.addLine(to: CGPoint(x: pts[i].x, y: pts[i].y))
         }
         return path
@@ -554,9 +574,12 @@ public struct MorphingXYAreaShape: Shape {
     }
 
     public func path(in rect: CGRect) -> Path {
-        let pts = data.points; guard pts.count > 1 else { return Path() }
+        let pts = data.points
+        guard pts.count > 1, !closingY.isNaN, !closingY.isInfinite else { return Path() }
+        guard !pts[0].x.isNaN, !pts[0].y.isNaN else { return Path() }
         var path = Path(); path.move(to: CGPoint(x: pts[0].x, y: pts[0].y))
         for i in 1..<pts.count {
+            guard !pts[i].x.isNaN, !pts[i].y.isNaN else { continue }
             path.addLine(to: CGPoint(x: pts[i].x, y: pts[i].y))
         }
         path.addLine(to: CGPoint(x: pts.last!.x, y: closingY))
@@ -569,7 +592,10 @@ public struct MorphingXYAreaShape: Shape {
 public struct AnimatableClipAbove: Shape {
     public var cutY: CGFloat
     public var animatableData: CGFloat { get { cutY } set { cutY = newValue } }
-    public func path(in rect: CGRect) -> Path { Path(CGRect(x: 0, y: 0, width: rect.width, height: max(0, cutY))) }
+    public func path(in rect: CGRect) -> Path {
+        guard !cutY.isNaN, !cutY.isInfinite else { return Path() }
+        return Path(CGRect(x: 0, y: 0, width: rect.width, height: max(0, cutY)))
+    }
 }
 
 public struct AnimatableClipBelow: Shape {
@@ -579,7 +605,8 @@ public struct AnimatableClipBelow: Shape {
         set { cutY = newValue.first; totalHeight = newValue.second }
     }
     public func path(in rect: CGRect) -> Path {
-        Path(CGRect(x: 0, y: cutY, width: rect.width, height: max(0, totalHeight - cutY)))
+        guard !cutY.isNaN, !cutY.isInfinite, !totalHeight.isNaN, !totalHeight.isInfinite else { return Path() }
+        return Path(CGRect(x: 0, y: cutY, width: rect.width, height: max(0, totalHeight - cutY)))
     }
 }
 
@@ -587,6 +614,7 @@ public struct AnimatableHDashLine: Shape {
     public var y: CGFloat
     public var animatableData: CGFloat { get { y } set { y = newValue } }
     public func path(in rect: CGRect) -> Path {
+        guard !y.isNaN, !y.isInfinite else { return Path() }
         var p = Path(); p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: rect.width, y: y)); return p
     }
 }
@@ -611,10 +639,7 @@ public struct StockInteractiveChartView: View {
             GeometryReader { geo in
                 let size = geo.size
                 ZStack(alignment: .topLeading) {
-                    if viewModel.isLoading && animatedData.points.isEmpty {
-                        ProgressView()
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else if !animatedData.points.isEmpty || !viewModel.dataPoints.isEmpty {
+                    if animatedData.points.count >= 2 {
                         // Start point baseline guide line
                         AnimatableHDashLine(y: animatedBaselineY)
                             .stroke(Color.white.opacity(0.20), style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
@@ -670,6 +695,15 @@ public struct StockInteractiveChartView: View {
                         if isDragging, let pt = selectedPoint {
                             scrubberOverlay(pt: pt, size: size)
                         }
+                    } else if viewModel.isLoading || !viewModel.hasLoaded || !viewModel.dataPoints.isEmpty {
+                        VStack(spacing: 12) {
+                            ProgressView()
+                                .progressViewStyle(CircularProgressViewStyle(tint: Color.PrimaryYellow))
+                            Text("Loading chart...")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(Color.white.opacity(0.65))
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         Text("No chart data available")
                             .font(.caption)

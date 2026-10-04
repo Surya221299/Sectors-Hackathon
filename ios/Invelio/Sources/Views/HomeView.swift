@@ -534,9 +534,6 @@ struct PortfolioSummaryCardView: View {
                     Text(String(format: "(%+.2f%%)", pct))
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(isPos ? green : red)
-                    Text("at date")
-                        .font(.system(size: 12, weight: .regular))
-                        .foregroundColor(.white.opacity(0.55))
                 }
             } else {
                 // 1D Return (Top)
