@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 // MARK: - Message Model
 struct ChatMessage: Identifiable, Equatable {
@@ -33,7 +34,7 @@ final class ChatViewModel: ObservableObject {
     private var sessionId = UUID()
     private var streamTask: Task<Void, Never>?
 
-    func send(_ query: String) {
+    func send(_ query: String, promptOverride: String? = nil) {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isProcessing else { return }
 
@@ -45,8 +46,9 @@ final class ChatViewModel: ObservableObject {
         let botMessageId = UUID()
         messages.append(ChatMessage(id: botMessageId, text: "", isUser: false, isFinished: false))
 
+        let payload = promptOverride ?? trimmed
         streamTask = Task {
-            await streamFromAgent(query: trimmed, botMessageId: botMessageId)
+            await streamFromAgent(query: payload, botMessageId: botMessageId)
         }
     }
 
@@ -234,6 +236,7 @@ struct ChatBubbleRow: View {
 
 // MARK: - Main Chatbot View
 struct ChatbotView: View {
+    @Query(sort: \HoldingLot.buyDate, order: .reverse) private var holdingLots: [HoldingLot]
     @StateObject private var viewModel = ChatViewModel()
     @FocusState private var isInputFocused: Bool
 
@@ -243,6 +246,37 @@ struct ChatbotView: View {
         "Recommended Stocks",
         "Why Did My Stock Move?"
     ]
+
+    private func enrichPromptIfNeeded(_ query: String) -> String {
+        let lower = query.lowercased()
+        let portfolioKeywords = [
+            "portfolio", "portofolio", "holding", "my stock", "saham saya",
+            "outlook", "risk", "risks", "why did my stock move"
+        ]
+        let isPortfolioQuery = portfolioKeywords.contains { lower.contains($0) }
+        guard isPortfolioQuery, !holdingLots.isEmpty else {
+            return query
+        }
+
+        var summary: [String: (name: String, shares: Double, invested: Double)] = [:]
+        for lot in holdingLots {
+            let t = lot.ticker.components(separatedBy: ".").first?.uppercased() ?? lot.ticker.uppercased()
+            if summary[t] == nil {
+                summary[t] = (name: lot.stockName, shares: 0, invested: 0)
+            }
+            summary[t]?.shares += lot.shares
+            summary[t]?.invested += lot.totalInvested
+        }
+
+        let holdingsList = summary.map { ticker, val in
+            let avgPrice = val.shares > 0 ? Int(val.invested / val.shares) : 0
+            let lotsCount = Int(val.shares / 100)
+            let nameDesc = val.name.isEmpty ? "" : " (\(val.name))"
+            return "\(ticker)\(nameDesc): \(lotsCount) lot(s) / \(Int(val.shares)) shares @ avg buy Rp \(avgPrice)"
+        }.joined(separator: ", ")
+
+        return "\(query)\n\n[User's Current Holdings on this device: \(holdingsList)]"
+    }
 
     var body: some View {
         NavigationStack {
@@ -330,7 +364,8 @@ struct ChatbotView: View {
             ForEach(sampleSuggestions, id: \.self) { suggestion in
                 Button {
                     withAnimation(.spring(response: 0.85, dampingFraction: 0.88)) {
-                        viewModel.send(suggestion)
+                        let enriched = enrichPromptIfNeeded(suggestion)
+                        viewModel.send(suggestion, promptOverride: enriched)
                     }
                 } label: {
                     HStack(spacing: 8) {
@@ -414,13 +449,17 @@ struct ChatbotView: View {
             .onSubmit {
                 guard !isSendDisabled else { return }
                 withAnimation(.spring(response: 0.85, dampingFraction: 0.88)) {
-                    viewModel.send(viewModel.inputText)
+                    let text = viewModel.inputText
+                    let enriched = enrichPromptIfNeeded(text)
+                    viewModel.send(text, promptOverride: enriched)
                 }
             }
 
             Button {
                 withAnimation(.spring(response: 0.85, dampingFraction: 0.88)) {
-                    viewModel.send(viewModel.inputText)
+                    let text = viewModel.inputText
+                    let enriched = enrichPromptIfNeeded(text)
+                    viewModel.send(text, promptOverride: enriched)
                 }
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
