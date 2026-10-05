@@ -22,6 +22,17 @@ struct ChatMessage: Identifiable, Equatable {
         self.isFinished = isFinished
         self.timestamp = timestamp
     }
+
+    var displayText: String {
+        guard !isUser else { return text }
+        return text
+            .replacingOccurrences(
+                of: #"(?m)^#{1,6}\s*(.+)$"#,
+                with: "**$1**",
+                options: .regularExpression
+            )
+            .replacingOccurrences(of: "###", with: "")
+    }
 }
 
 // MARK: - View Model
@@ -157,7 +168,7 @@ struct ChatBubbleRow: View {
             } else {
                 VStack(alignment: .leading, spacing: 10) {
                     // Message Content
-                    Text(LocalizedStringKey(message.text))
+                    Text(LocalizedStringKey(message.displayText))
                         .font(.system(size: 14.5, weight: .regular))
                         .foregroundStyle(Color.white.opacity(0.92))
                         .lineSpacing(4)

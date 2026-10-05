@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, TypedDict, cast
@@ -185,7 +186,12 @@ Specific Query Types:
    - Format Indonesian Rupiah cleanly (e.g. Rp 4,030, Rp 372.4T).
    - Always keep numbers accurate from retrieved data.
 
-## Retrieved Data
+Formatting & Heading Mandate:
+- CRITICAL: NEVER use markdown heading hashtags (#, ##, ###) for titles, subtitles, or section names anywhere in your response.
+- The mobile UI cannot render markdown header tags and will display raw "###".
+- Always use bold text with a colon instead (e.g., "**Tesis Investasi Utama:**", "**Risiko yang Perlu Dipantau:**", "**Key Investment Thesis:**").
+
+[Retrieved Data]
 {context}"""
 
 
@@ -753,7 +759,11 @@ def _wrap_mcp_tool_cached(original: Any, db: AsyncSession | None) -> Any:
                 return hit.get("result", hit)
             data = await original.ainvoke(result)
             data_str = str(data).lower()
-            if "validation error" not in data_str and "invalid arguments" not in data_str and "error" not in data_str[:100]:
+            if (
+                "validation error" not in data_str
+                and "invalid arguments" not in data_str
+                and "error" not in data_str[:100]
+            ):
                 await cache_set(mcp_key, {"result": data}, ttl, db)
             return data
 
@@ -809,6 +819,250 @@ async def _get_tools(db: AsyncSession | None = None, device_id: str | None = Non
         client = CachedSectorsClient(db)
         rest_tools = _build_rest_tools(client)
         yield internal_tools + rest_tools
+
+
+def _detect_user_language(text: str) -> str:
+    """Detect if the user query is predominantly Indonesian or English."""
+    id_words = {
+        "kenapa",
+        "harus",
+        "beli",
+        "saham",
+        "apakah",
+        "bagus",
+        "turun",
+        "anjlok",
+        "rugi",
+        "bagaimana",
+        "rekomendasi",
+        "portofolio",
+        "dividen",
+        "apa",
+        "alasan",
+        "layak",
+        "untung",
+        "prospek",
+        "kinerja",
+        "analisis",
+        "berapa",
+        "investasi",
+        "saya",
+        "ini",
+    }
+    tokens = set(text.lower().replace("?", " ").replace("!", " ").replace(".", " ").split())
+    if tokens & id_words:
+        return "id"
+    return "en"
+
+
+def _synthesize_analyst_directive(
+    user_message: str, question_type: str, entities: list[str]
+) -> str:
+    """Generate dynamic analytical reasoning instructions tailored specifically to the user's inquiry.
+
+    This ensures Gemini does not output static, defensive, or boilerplate company profiles,
+    but instead critically interprets the retrieved Sectors & Invelio AI data to directly
+    answer the user's specific investment angle (e.g. 'Why Buy', 'Why did it drop', 'Dividend outlook').
+    """
+    msg = user_message.lower()
+    ticker_str = ", ".join(entities) if entities else "the requested stock"
+    lang = _detect_user_language(user_message)
+    lang_instruction = (
+        "LANGUAGE MANDATE: You MUST respond in fluent, professional Bahasa Indonesia."
+        if lang == "id"
+        else "LANGUAGE MANDATE: You MUST respond in clear, professional English."
+    )
+
+    # 1. Buy Thesis / Why Buy / Should I Buy
+    buy_signals = [
+        "why buy",
+        "why should i buy",
+        "should i buy",
+        "kenapa beli",
+        "kenapa harus beli",
+        "layak beli",
+        "alasan beli",
+        "prospek beli",
+        "beli atau tidak",
+        "rekomendasi beli",
+        "worth buying",
+        "good buy",
+        "is it a buy",
+        "reasons to buy",
+        "apakah layak",
+        "apakah bagus",
+        "rekomendasi",
+        "alasan untuk beli",
+    ]
+    if any(s in msg for s in buy_signals):
+        if lang == "id":
+            return (
+                f"\n\n[MANDATORY ANALYTICAL TASK: BUY THESIS & INVESTMENT REASONS FOR {ticker_str}]\n"
+                f"{lang_instruction}\n"
+                f'User Inquiry: "{user_message}"\n'
+                "Instruksi Analis: Anda adalah Senior Equity Research Analyst Invelio. Pengguna menanyakan ALASAN MEMBELI / TESIS INVESTASI.\n"
+                "FORMAT WAJIB: DILARANG KERAS menggunakan tanda pagar markdown (###, ##, #) untuk judul atau pemisah bagian apapun karena aplikasi akan menampilkan tanda pagar mentah. Gunakan format teks tebal (**Judul Bagian:**).\n"
+                "DILARANG memberikan pembukaan basa-basi atau profil umum perusahaan ('Bank Mandiri didirikan tahun...').\n"
+                "Olah seluruh data Sectors dan Invelio yang terambil di atas menjadi TESIS INVESTASI BERBOBOT dan PERSUASIF:\n"
+                "1. **Buka Langsung dengan Inti Tesis di Kalimat Pertama:** (Contoh: 'Berikut adalah tesis investasi utama dan alasan mengapa investor mempertimbangkan untuk membeli PT [Perusahaan] ([Ticker]):')\n"
+                "2. **Kelompokkan Bukti Menjadi Poin Katalis Tebal (Bold Bullet Points):**\n"
+                "   - **Valuasi Menarik & Rasio Keuangan:** Bandingkan P/E saat ini, forward P/E, dan PBV terhadap median industri. Jelaskan mengapa angka ini murah/menarik.\n"
+                "   - **Profitabilitas & Efisiensi Modal:** Paparkan Return on Equity (ROE) dan margin laba yang kuat.\n"
+                "   - **Imbal Hasil Dividen (Dividend Yield):** Sorot persentase dividend yield (>5%) dan rekam jejak dividen tunai.\n"
+                "   - **Dukungan Institusi & Sinyal Smart Money:** Sebutkan keterlibatan investor strategis/Danantara, akumulasi orang dalam (insider buying), atau net foreign buy.\n"
+                "   - **Skor Kuantitatif Invelio AI:** Jika ada di data, cantumkan skor keseluruhan (0-100) dan rekomendasi BUY/HOLD dari model multi-faktor Invelio.\n"
+                "3. **Risiko yang Perlu Dipantau:** 1-2 risiko realistis (misal tekanan makro/outflow asing) agar analisis berimbang.\n"
+                "4. **Disclaimer Singkat di Akhir:** Taruh 1 baris disclaimer edukasi di paling bawah: '*Disclaimer: For research and educational purposes only; not personalized financial advice.*'"
+            )
+        else:
+            return (
+                f"\n\n[MANDATORY ANALYTICAL TASK: BUY THESIS & INVESTMENT REASONS FOR {ticker_str}]\n"
+                f"{lang_instruction}\n"
+                f'User Inquiry: "{user_message}"\n'
+                "Analyst Directive: You are a Senior Equity Research Analyst for Invelio. The user is asking WHY they should BUY / invest in this stock.\n"
+                "CRITICAL FORMATTING MANDATE: NEVER use markdown heading hashtags (###, ##, #) for any headers or section titles. Use bold text (**Section Title:**) instead.\n"
+                "Do NOT provide a generic boilerplate company history, passive definitions, or defensive apologies.\n"
+                "Synthesize the retrieved Sectors and Invelio data into a compelling, data-backed Bull Case Investment Thesis:\n"
+                "1. **Open Directly with the Core Thesis in Sentence 1:** (e.g., 'Here is the key investment thesis and primary reasons why investors consider buying PT [Company] ([Ticker]):')\n"
+                "2. **Structure Evidence into Bold Catalysts:**\n"
+                "   - **Valuation & Multiples:** Compare current P/E, forward P/E, and PBV against sector peers to demonstrate value discount.\n"
+                "   - **Profitability & Capital Efficiency:** Highlight Return on Equity (ROE) and capital efficiency.\n"
+                "   - **Dividend Yield & Cash Returns:** Emphasize dividend yield percentage (>5%) and payout consistency.\n"
+                "   - **Institutional & Smart Money Backing:** Cite insider accumulation, sovereign investment (Danantara), or institutional flows.\n"
+                "   - **Invelio AI Model Verdict:** Explicitly cite Invelio's proprietary quantitative score (0-100) and BUY/HOLD recommendation.\n"
+                "3. **Key Risks to Monitor:** 1-2 concise, balanced risks (e.g. macro headwinds, rates) for professional balance.\n"
+                "4. **Compact Disclaimer at End:** '*Disclaimer: For research and educational purposes only; not personalized financial advice.*'"
+            )
+
+    # 2. Price drop / Sell / Negative performance
+    drop_signals = [
+        "why drop",
+        "why fell",
+        "why down",
+        "kenapa turun",
+        "anjlok",
+        "kenapa merah",
+        "turun hari ini",
+        "rugi",
+        "cut loss",
+    ]
+    if any(s in msg for s in drop_signals):
+        return (
+            f"\n\n[MANDATORY ANALYTICAL TASK: PRICE DROP & VOLATILITY ANALYSIS FOR {ticker_str}]\n"
+            f"{lang_instruction}\n"
+            "Analyze the retrieved daily price changes, foreign capital flow (net foreign sell/outflow), "
+            "and negative news sentiment to clearly explain the market catalysts behind the drop and key support levels. "
+            "Do NOT use markdown hashtags (###). Use bold text for sections."
+        )
+
+    # 3. Dividend inquiry
+    dividend_signals = ["dividend", "dividen", "yield", "payout", "jadwal dividen"]
+    if any(s in msg for s in dividend_signals):
+        return (
+            f"\n\n[MANDATORY ANALYTICAL TASK: DIVIDEND & INCOME ANALYSIS FOR {ticker_str}]\n"
+            f"{lang_instruction}\n"
+            "Focus directly on {ticker_str}'s dividend yield (TTM), historical dividend track record, "
+            "cash flow stability, and corporate action schedules from the retrieved data. "
+            "Do NOT use markdown hashtags (###). Use bold text for sections."
+        )
+
+    # 4. Multi-stock comparison
+    if len(entities) >= 2 or question_type == "comparison":
+        return (
+            f"\n\n[MANDATORY ANALYTICAL TASK: HEAD-TO-HEAD COMPARISON FOR {ticker_str}]\n"
+            f"{lang_instruction}\n"
+            "Compare the tickers head-to-head across Valuation (P/E, PBV), Profitability (ROE), "
+            "Dividend Yield, Market Cap scale, and Invelio AI Scores. Give a clear analytical verdict on which stock suits what investor profile. "
+            "Do NOT use markdown hashtags (###). Use bold text for sections."
+        )
+
+    # Default single stock
+    if entities or question_type == "single_stock":
+        return (
+            f"\n\n{lang_instruction}\nDirectly analyze {ticker_str} using the retrieved data above."
+        )
+
+    return f"\n\n{lang_instruction}"
+
+
+def _clean_markdown_headings(text: str) -> str:
+    """Convert or remove markdown heading hashtags (#, ##, ###) so chat responses never contain raw ###."""
+    if not text:
+        return ""
+
+    def _replace_header(match: re.Match[str]) -> str:
+        content = match.group(1).strip()
+        if content.startswith("**") and content.endswith("**"):
+            return content
+        return f"**{content}**"
+
+    # Convert lines starting with '#' followed by heading text into bold text
+    cleaned = re.sub(r"(?m)^#{1,6}\s+(.+)$", _replace_header, text)
+    # Strip any remaining stray hash sequences
+    cleaned = re.sub(r"#{2,6}", "", cleaned)
+    return cleaned
+
+
+async def _stream_clean_headings(chunks: AsyncIterator[str]) -> AsyncIterator[str]:
+    """Filter markdown heading hashtags (#, ##, ###) on the fly during SSE streaming."""
+    line_buf = ""
+    in_heading = False
+    checking_line_start = True
+
+    async for chunk in chunks:
+        pos = 0
+        while pos < len(chunk):
+            if in_heading:
+                nl_idx = chunk.find("\n", pos)
+                if nl_idx != -1:
+                    line_buf += chunk[pos : nl_idx + 1]
+                    yield _clean_markdown_headings(line_buf)
+                    line_buf = ""
+                    in_heading = False
+                    checking_line_start = True
+                    pos = nl_idx + 1
+                else:
+                    line_buf += chunk[pos:]
+                    pos = len(chunk)
+            elif checking_line_start:
+                nl_idx = chunk.find("\n", pos)
+                segment = chunk[pos : nl_idx + 1] if nl_idx != -1 else chunk[pos:]
+                line_buf += segment
+                stripped = line_buf.lstrip()
+                if stripped.startswith("#"):
+                    in_heading = True
+                    if nl_idx != -1:
+                        yield _clean_markdown_headings(line_buf)
+                        line_buf = ""
+                        in_heading = False
+                        checking_line_start = True
+                    pos = nl_idx + 1 if nl_idx != -1 else len(chunk)
+                elif stripped:
+                    yield line_buf
+                    line_buf = ""
+                    checking_line_start = False
+                    if nl_idx != -1:
+                        checking_line_start = True
+                    pos = nl_idx + 1 if nl_idx != -1 else len(chunk)
+                elif nl_idx != -1:
+                    yield line_buf
+                    line_buf = ""
+                    checking_line_start = True
+                    pos = nl_idx + 1
+                else:
+                    pos = len(chunk)
+            else:
+                nl_idx = chunk.find("\n", pos)
+                if nl_idx != -1:
+                    yield chunk[pos : nl_idx + 1]
+                    checking_line_start = True
+                    pos = nl_idx + 1
+                else:
+                    yield chunk[pos:]
+                    pos = len(chunk)
+
+    if line_buf:
+        yield _clean_markdown_headings(line_buf)
 
 
 # ---------------------------------------------------------------------------
@@ -892,12 +1146,23 @@ class ChatbotAgent:
             args_str = (
                 ", ".join(f"{k}={v!r}" for k, v in item["args"].items()) if item["args"] else ""
             )
-            parts.append(f"### {item['tool']}({args_str})\n{item['data']}")
+            data_str = str(item["data"])
+            # Filter out ugly technical validation errors so they do not pollute LLM context
+            if "validation error" in data_str.lower() or "not match schema" in data_str.lower():
+                continue
+            parts.append(f"[{item['tool']}({args_str})]\n{data_str}")
         return "\n\n".join(parts) if parts else "(no data retrieved)"
 
     def _build_response_messages(self, state: ChatState) -> list[Any]:
         context_text = self._format_context(state.get("context", []))
+        directive = _synthesize_analyst_directive(
+            state["user_message"],
+            state.get("question_type", ""),
+            state.get("entities", []),
+        )
         system = RESPONSE_PROMPT.format(context=context_text)
+        if directive:
+            system = f"{system}\n\n{directive}"
 
         history_msgs: list[Any] = []
         for msg in (state.get("chat_history") or [])[-6:]:
@@ -906,17 +1171,24 @@ class ChatbotAgent:
             else:
                 history_msgs.append(AIMessage(content=msg["content"]))
 
+        user_content = state["user_message"]
+        if directive and "MANDATORY ANALYTICAL TASK" in directive:
+            user_content = (
+                f"{user_content}\n\n"
+                f"[Analyst Reminder: Synthesize the investment thesis directly answering this inquiry using the data above.]"
+            )
+
         return [
             SystemMessage(content=system),
             *history_msgs,
-            HumanMessage(content=state["user_message"]),
+            HumanMessage(content=user_content),
         ]
 
     async def _generate_response(self, state: ChatState) -> dict[str, Any]:
         llm = _get_llm(temperature=0.3)
         messages = self._build_response_messages(state)
         result = await llm.ainvoke(messages)
-        return {"response": _extract_text(result.content)}
+        return {"response": _clean_markdown_headings(_extract_text(result.content))}
 
     # -- Graph ---------------------------------------------------------------
 
@@ -976,7 +1248,12 @@ class ChatbotAgent:
 
             messages = self._build_response_messages(state)
             llm = _get_llm(temperature=0.3, streaming=True)
-            async for chunk in llm.astream(messages):
-                text = _extract_text(chunk.content) if chunk.content else ""
-                if text:
-                    yield text
+
+            async def _raw_token_generator() -> AsyncIterator[str]:
+                async for chunk in llm.astream(messages):
+                    text = _extract_text(chunk.content) if chunk.content else ""
+                    if text:
+                        yield text
+
+            async for cleaned_chunk in _stream_clean_headings(_raw_token_generator()):
+                yield cleaned_chunk
