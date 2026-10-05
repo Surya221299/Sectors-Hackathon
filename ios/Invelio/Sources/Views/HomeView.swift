@@ -1170,13 +1170,24 @@ final class HomeDataStore: ObservableObject {
     private var isPrefetchingTop3: Bool = false
 
     var topRecommendedStocks: [StockItem] {
-        let sorted = liveStocks.sorted { $0.percentChange > $1.percentChange }
+        let sorted = liveStocks.sorted {
+            if $0.sentiment.score != $1.sentiment.score {
+                return $0.sentiment.score > $1.sentiment.score
+            }
+            return $0.percentChange > $1.percentChange
+        }
         return Array(sorted.prefix(3))
     }
 
     var otherStocks: [StockItem] {
         let topIDs = Set(topRecommendedStocks.map(\.id))
-        return liveStocks.filter { !topIDs.contains($0.id) }
+        let remaining = liveStocks.filter { !topIDs.contains($0.id) }
+        return remaining.sorted {
+            if $0.sentiment.score != $1.sentiment.score {
+                return $0.sentiment.score > $1.sentiment.score
+            }
+            return $0.percentChange > $1.percentChange
+        }
     }
 
     func preloadAll(forceRefresh: Bool = false) async {
