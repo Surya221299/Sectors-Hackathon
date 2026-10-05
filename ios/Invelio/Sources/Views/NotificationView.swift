@@ -81,6 +81,7 @@ struct NotificationView: View {
 
 private struct AlertRow: View {
     let alert: BackendAlert
+    @State private var isExpanded = false
 
     private var severityColor: Color {
         switch alert.severity {
@@ -142,7 +143,7 @@ private struct AlertRow: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     if let ticker = cleanTicker {
                         Text(ticker)
@@ -165,7 +166,26 @@ private struct AlertRow: View {
                 Text(alert.message)
                     .font(.system(size: 13))
                     .foregroundColor(.white.opacity(alert.isRead ? 0.5 : 0.85))
-                    .lineLimit(3)
+                    .lineLimit(isExpanded ? nil : 2)
+
+                HStack {
+                    Spacer()
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            isExpanded.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Text(isExpanded ? "Sembunyikan" : "Read more")
+                                .font(.system(size: 11, weight: .semibold))
+                            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 8, weight: .bold))
+                        }
+                        .foregroundColor(Color.PrimaryPurple)
+                        .padding(.top, 2)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
 
             if !alert.isRead {
