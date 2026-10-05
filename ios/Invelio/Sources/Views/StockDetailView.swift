@@ -1024,10 +1024,16 @@ public struct StockDetailView: View {
     @State private var isDragging: Bool = false
 
     // Purchase / Lots management state
+    private enum HoldingFormField: Hashable {
+        case price(UUID)
+        case lot(UUID)
+    }
+
     @State private var purchaseEntries: [PurchaseFormEntry] = []
     @State private var cachedAnalysisChips: [InsightChip] = []
     @State private var activeDatePickerEntryID: UUID? = nil
     @State private var tempSelectedDate: Date = Date()
+    @FocusState private var focusedField: HoldingFormField?
 
     public init(
         quote: StockQuote,
@@ -1128,6 +1134,7 @@ public struct StockDetailView: View {
                 .padding(.top, 12)
                 .padding(.bottom, 32)
             }
+            .scrollDismissesKeyboard(.interactively)
         }
         .preferredColorScheme(.dark)
         .tint(.white)
@@ -1135,6 +1142,24 @@ public struct StockDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
+        .safeAreaInset(edge: .bottom) {
+            if focusedField != nil {
+                Button {
+                    focusedField = nil
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                } label: {
+                    Text("Done")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Color.blue, in: RoundedRectangle(cornerRadius: 12))
+                }
+                .padding(.horizontal, 32)
+                .padding(.vertical, 8)
+                .background(Color.DarkPurpleAppBackground.opacity(0.95))
+            }
+        }
         .task {
             loadExistingHoldings()
             await fetchLiveStockDetail()
@@ -1670,8 +1695,21 @@ public struct StockDetailView: View {
 
                         HStack(spacing: 8) {
                             let prefix = currencyPrefix.trimmingCharacters(in: .whitespaces)
-                            inputField(label: "Cost / Share", prefix: prefix, text: $entry.priceInput)
-                            inputField(label: "Total Lot", prefix: "", text: $entry.lotInput, suffix: "lot", fontSize: 14)
+                            inputField(
+                                label: "Cost / Share",
+                                prefix: prefix,
+                                text: $entry.priceInput,
+                                field: .price(entry.id)
+                            )
+                            inputField(
+                                label: "Total Lot",
+                                prefix: "",
+                                text: $entry.lotInput,
+                                suffix: "lot",
+                                fontSize: 14,
+                                borderColor: Color.blue,
+                                field: .lot(entry.id)
+                            )
 
                             VStack(alignment: .leading, spacing: 6) {
                                 Text("Total Buy")
@@ -1694,8 +1732,8 @@ public struct StockDetailView: View {
                                     }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(8)
-                                .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
+                                .padding(.vertical, 8)
+                                .padding(.horizontal, 2)
                             }
                             .frame(maxWidth: .infinity)
                         }
@@ -1719,8 +1757,12 @@ public struct StockDetailView: View {
 
                 // Add Share Button
                 Button {
+                    let newEntry = PurchaseFormEntry(date: Date(), priceInput: formatNumber(quote.price), lotInput: "")
                     withAnimation(.spring()) {
-                        purchaseEntries.append(PurchaseFormEntry(date: Date(), priceInput: formatNumber(quote.price), lotInput: ""))
+                        purchaseEntries.append(newEntry)
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        focusedField = .lot(newEntry.id)
                     }
                 } label: {
                     HStack(spacing: 5) {
@@ -1743,7 +1785,9 @@ public struct StockDetailView: View {
         text: Binding<String>,
         suffix: String = "",
         fontSize: CGFloat = 15,
-        prefixSize: CGFloat = 12
+        prefixSize: CGFloat = 12,
+        borderColor: Color? = nil,
+        field: HoldingFormField? = nil
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label)
@@ -1756,6 +1800,7 @@ public struct StockDetailView: View {
                         .foregroundStyle(Color.white.opacity(0.65))
                 }
                 TextField("0", text: text)
+                    .focused($focusedField, equals: field)
                     .keyboardType(.decimalPad)
                     .font(.system(size: fontSize, weight: .bold, design: .rounded))
                     .minimumScaleFactor(0.75)
@@ -1768,6 +1813,10 @@ public struct StockDetailView: View {
             }
             .padding(8)
             .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(borderColor ?? Color.clear, lineWidth: 1)
+            )
         }
         .frame(maxWidth: .infinity)
     }
