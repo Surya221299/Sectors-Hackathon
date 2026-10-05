@@ -22,6 +22,7 @@
 		B2FF6181F102889BD37E4E78 /* invelio-icon.png in Resources */ = {isa = PBXBuildFile; fileRef = 3703B839AE093277E79EDC8F /* invelio-icon.png */; };
 		C52AC931BF45F914967A9F99 /* InvelioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C65A82A9BB7B48C0C464624 /* InvelioApp.swift */; };
 		CC8E61BB237156A505F79A2B /* HoldingLot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 894F8615DD4071CD86E61786 /* HoldingLot.swift */; };
+		D8B3F4F13073C6E8002F8D88 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = D8B3F4F03073C6E8002F8D88 /* AppIcon.icon */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -53,6 +54,7 @@
 		A33569C3ABEB5979E1EC1BD6 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		B1161490963A206CA3A1F812 /* Stock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Stock.swift; sourceTree = "<group>"; };
 		BD7F0584EE15FFDA66665828 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		D8B3F4F03073C6E8002F8D88 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		F30EF2A838D1272702A46C6E /* Invelio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Invelio.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -90,6 +92,7 @@
 		3E410CAA2D1EF6E0CD5F725F = {
 			isa = PBXGroup;
 			children = (
+				D8B3F4F03073C6E8002F8D88 /* AppIcon.icon */,
 				E79179232BA0D679D9BD58D2 /* Sources */,
 				99E8A4742E54F346E758E1BB /* Tests */,
 				2A7A022ED49606C90988FE04 /* Products */,
@@ -229,6 +232,7 @@
 			files = (
 				60FF1E2B6894A6D42CFEF340 /* Assets.xcassets in Resources */,
 				B2FF6181F102889BD37E4E78 /* invelio-icon.png in Resources */,
+				D8B3F4F13073C6E8002F8D88 /* AppIcon.icon in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
