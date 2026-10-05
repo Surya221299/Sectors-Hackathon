@@ -23,6 +23,8 @@ Every single datapoint—from valuation ratios, 90-day OHLCV price histories, fo
 
 ## 🏛️ System Architecture
 
+![Invelio Layer & Flow](./Invelio%20Layer%20%26%20Flow.png)
+
 ```mermaid
 flowchart TB
     subgraph iOS_Client["📱 iOS Client (SwiftUI + Swift Charts)"]
