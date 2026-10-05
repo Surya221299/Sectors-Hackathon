@@ -5,8 +5,7 @@ actor APIClient {
     static let shared = APIClient()
 
     private let baseURL = URL(string: "https://invelio-backend-x76qhzvtsa-et.a.run.app/api")!
-
-
+    
     private let session: URLSession
 
     nonisolated var deviceId: String {
