@@ -112,7 +112,8 @@ async def test_detect_volume_surge():
     assert len(result["anomalies"]) == 1
     assert result["anomalies"][0]["alert_type"] == "volume_surge"
     assert result["anomalies"][0]["severity"] == "medium"
-    assert "most-traded" in result["anomalies"][0]["message"]
+    assert "BBRI" in result["anomalies"][0]["message"]
+    assert len(result["anomalies"][0]["message"]) > 20
 
 
 @pytest.mark.asyncio
