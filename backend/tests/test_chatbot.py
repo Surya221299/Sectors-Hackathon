@@ -480,11 +480,26 @@ async def test_get_tools_combines_internal_and_rest(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_tools_combines_internal_and_mcp(monkeypatch):
+    from contextlib import asynccontextmanager
+    from unittest.mock import MagicMock
+
+    fake_mcp_tool_1 = MagicMock(name="fetch-company-report")
+    fake_mcp_tool_1.name = "fetch-company-report"
+    fake_mcp_tool_2 = MagicMock(name="fetch-daily-price")
+    fake_mcp_tool_2.name = "fetch-daily-price"
+
+    @asynccontextmanager
+    async def mock_mcp(db=None):
+        yield [fake_mcp_tool_1, fake_mcp_tool_2]
+
     monkeypatch.setattr(settings, "use_mcp", True)
+    monkeypatch.setattr("app.agents.chatbot._mcp_tools", mock_mcp)
     async with _get_tools(db=None, device_id="dev-1") as tools:
         names = {t.name for t in tools}
         assert "get_my_portfolio" in names
         assert "get_top_recommended_stocks" in names
+        assert "get_stock_ai_score" in names
+        assert "get_stock_ai_insights" in names
         assert "fetch-company-report" in names
         assert "fetch-daily-price" in names
 

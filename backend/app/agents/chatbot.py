@@ -129,7 +129,11 @@ Rules:
 - For recommendation questions (e.g. "Recommended Stocks", "Top stocks"):
   1. Call get_top_recommended_stocks to get the top 3 AI-scored stocks from the database.
   2. You may also fetch sector reports or market movers if helpful.
-- For single stock questions, fetch the company report and optionally news.
+- For single stock investment thesis, buy/sell questions, or outlook (e.g. "Why should I buy BMRI?", "Should I buy BBCA?", "Is BBRI a buy?"):
+  1. If internal database tools are available, call get_stock_ai_score and/or get_stock_ai_insights to fetch Invelio's proprietary 5-pillar score, recommendation status, and equity thesis.
+  2. Call get_company_report to retrieve valuation (P/E, PBV, ROE, dividend yield, market cap rank).
+  3. Call get_insider_transactions, get_foreign_flow, or get_news to uncover institutional signals, insider accumulation, and recent catalysts.
+- For single stock questions, fetch the company report and optionally news or insider transactions.
 - For comparisons, fetch company reports for each ticker.
 - For sector questions, fetch the sector/subsector report.
 - For market questions, fetch market index data and top movers.
@@ -144,28 +148,42 @@ Question type: {question_type}
 Detected tickers: {entities}"""
 
 RESPONSE_PROMPT = """\
-You are Invelio, an AI financial assistant for the Indonesian stock market (IDX).
+You are Invelio, an intelligent AI financial research assistant for the Indonesian stock market (IDX).
 
 Your answers MUST be grounded in the retrieved data below.
-Never fabricate financial numbers. If the data is insufficient, say so.
+Never fabricate financial figures. If data is missing or insufficient, state it clearly.
 
-Guidelines:
-- Be concise and informative (2-4 paragraphs)
-- For portfolio queries:
-  - If the user has holdings, summarize their positions (ticker, shares, average price) and
-    analyze their outlook and risks based on the retrieved market data.
-  - If the user's portfolio is empty, inform them warmly that their portfolio currently has no
-    tracked holdings, and invite them to add stocks in the Portfolio tab.
-- For recommendations queries:
-  - Present the Top 3 AI recommendations clearly with their rank, ticker, company name,
-    overall score, recommendation status (BUY/HOLD/SELL), and key reasoning.
-  - Explain that recommendations are powered by Invelio's multi-factor model
-    (Fundamental 30%, Macro 15%, Sector 20%, Risk 15%, Sentiment 20%).
-- Use actual numbers from the data (prices, ratios, percentages)
-- Format currency as Indonesian Rupiah (e.g. Rp 8,450)
-- Present data objectively — do not give explicit buy/sell financial advice
-- Reference the data source (e.g. "Based on Invelio's AI scoring engine and Sectors market data...")
-- For comparisons, use a structured format
+Language Rule:
+- Always respond in the SAME LANGUAGE as the user's inquiry (e.g., respond in English if asked in English, Bahasa Indonesia if asked in Indonesian).
+
+Response Structure & Directness:
+- CRITICAL: Never start with generic data preambles like "Based on the latest Sectors data, PT [Company] closed at Rp X on Date..." or raw dates.
+- Answer the user's question directly from the very first sentence.
+
+Specific Query Types:
+1. Stock Thesis & "Why Buy / Should I Buy / Is [Ticker] a Good Buy?" Queries:
+   - Immediate Opening: Open directly with the core investment thesis answering why investors are considering or bullish on this stock (e.g. "Here is the key investment thesis and primary reasons why investors consider buying PT Bank Mandiri (BMRI):" or in Indonesian "Berikut adalah tesis investasi utama dan alasan investor mempertimbangkan membeli PT Bank Mandiri (BMRI):").
+   - Key Investment Catalysts ("Why Buy"): Structure the arguments into clear bold bullet points synthesizing retrieved data:
+     * Valuation & Profitability: Forward P/E, P/BV vs sector median, ROE capital efficiency, strong balance sheet.
+     * Dividend Yield & Capital Return: High dividend yield (e.g. >5% yield), consistent shareholder payouts.
+     * Institutional & Insider Confidence: Insider accumulation (executives/directors purchasing shares), sovereign/institutional backing (Danantara tags), or foreign institutional capital flow.
+     * Industry Dominance & Scale: Market cap ranking, digital banking or loan growth, competitive moat.
+     * Invelio AI Score & Recommendation: If available in retrieved data, explicitly cite Invelio's quantitative score (0-100) and BUY/HOLD recommendation status.
+   - Key Risks to Monitor: Provide a brief, balanced section (1-2 concise bullet points) detailing key risk factors to watch (e.g. interest rate cycle, credit quality/NPLs, macroeconomic headwinds).
+   - Disclaimer: Do NOT start with defensive apologies ("As an AI assistant, I do not provide financial advice..."). Present the objective analysis first, and place a compact 1-line disclaimer at the very end: "*Disclaimer: For research and educational purposes only; not personalized financial advice.*"
+
+2. Portfolio Queries:
+   - If the user has holdings, summarize positions (ticker, shares, average price) and analyze outlook and risks based on retrieved data.
+   - If empty, warmly inform them that their portfolio currently has no tracked holdings, and invite them to add stocks in the Portfolio tab.
+
+3. Top Recommendations Queries:
+   - Present Top 3 AI recommendations clearly with rank, ticker, company name, overall score, recommendation status (BUY/HOLD/SELL), and key reasoning.
+   - Explain that recommendations are powered by Invelio's 5-pillar multi-factor model (Fundamental 30%, Macro 15%, Sector 20%, Risk 15%, Sentiment 20%).
+
+4. General Single Stock / Sector / Comparison Queries:
+   - Use clean, structured bullet points.
+   - Format Indonesian Rupiah cleanly (e.g. Rp 4,030, Rp 372.4T).
+   - Always keep numbers accurate from retrieved data.
 
 ## Retrieved Data
 {context}"""
@@ -466,7 +484,84 @@ def _build_internal_tools(db: AsyncSession | None, device_id: str | None) -> lis
             logger.warning("Failed to fetch recommended stocks: %s", exc)
             return f"Error retrieving recommendations: {exc}"
 
-    return [get_my_portfolio, get_top_recommended_stocks]
+    @tool
+    async def get_stock_ai_score(ticker: str) -> str:
+        """Get Invelio's proprietary AI quantitative score (0-100), recommendation (BUY/HOLD/SELL),
+        5-pillar component scores (Fundamental, Macro, Sector, Risk, Sentiment), and equity thesis
+        for a specific tracked IDX ticker (e.g. BMRI, BBCA, BBRI)."""
+        if db is None:
+            return "Stock score unavailable (database not connected)."
+        clean = _validate_ticker(ticker)
+        if clean is None:
+            return f"Ticker {ticker!r} is not tracked."
+        try:
+            from app.db.scores import latest_scores
+
+            rows = await latest_scores(db)
+            match = next((r for r in rows if r.get("ticker") == clean), None)
+            if not match:
+                return f"No score recorded yet for {clean}."
+            return _truncate(
+                json.dumps(
+                    {
+                        "ticker": match.get("ticker"),
+                        "name": match.get("name"),
+                        "overall_score": match.get("overall_score"),
+                        "recommendation": match.get("recommendation"),
+                        "thesis": match.get("reasoning"),
+                        "component_scores": {
+                            "fundamental": match.get("fundamental_score"),
+                            "macro": match.get("macro_score"),
+                            "sector": match.get("sector_score"),
+                            "risk": match.get("risk_score"),
+                            "sentiment": match.get("sentiment_score"),
+                        },
+                    },
+                    default=str,
+                )
+            )
+        except Exception as exc:
+            logger.warning("Failed to fetch stock score for %s: %s", clean, exc)
+            return f"Error retrieving stock score: {exc}"
+
+    @tool
+    async def get_stock_ai_insights(ticker: str) -> str:
+        """Get Invelio's daily 4-card AI equity research insights (Technical Analysis,
+        Fundamentals, Market Sentiment, and Outlook & Risks) for a specific tracked IDX stock."""
+        if db is None:
+            return "Stock insights unavailable (database not connected)."
+        clean = _validate_ticker(ticker)
+        if clean is None:
+            return f"Ticker {ticker!r} is not tracked."
+        try:
+            from app.db.stock_insights import latest_stock_insights
+
+            insights = await latest_stock_insights(db, clean)
+            if not insights:
+                return f"No structured AI insights available yet for {clean}."
+            return _truncate(
+                json.dumps(
+                    [
+                        {
+                            "analysis_type": i.get("analysis_type"),
+                            "label": i.get("label"),
+                            "content": i.get("content"),
+                        }
+                        for i in insights
+                    ],
+                    default=str,
+                )
+            )
+        except Exception as exc:
+            logger.warning("Failed to fetch stock insights for %s: %s", clean, exc)
+            return f"Error retrieving stock insights: {exc}"
+
+    return [
+        get_my_portfolio,
+        get_top_recommended_stocks,
+        get_stock_ai_score,
+        get_stock_ai_insights,
+    ]
 
 
 # ---------------------------------------------------------------------------
