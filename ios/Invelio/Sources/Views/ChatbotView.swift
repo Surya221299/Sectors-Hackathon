@@ -101,6 +101,429 @@ final class ChatViewModel: ObservableObject {
     }
 }
 
+// MARK: - Markdown Table Models & Content
+public struct MarkdownTableRow: Identifiable, Equatable {
+    public let id: Int
+    public let cells: [String]
+
+    public init(id: Int, cells: [String]) {
+        self.id = id
+        self.cells = cells
+    }
+}
+
+public struct MarkdownTable: Identifiable, Equatable {
+    public let id: String
+    public let headers: [String]
+    public let alignments: [TextAlignment]
+    public let rows: [MarkdownTableRow]
+
+    public var rawRows: [[String]] {
+        rows.map { $0.cells }
+    }
+
+    public init(
+        id: String = UUID().uuidString,
+        headers: [String],
+        alignments: [TextAlignment],
+        rows: [MarkdownTableRow]
+    ) {
+        self.id = id
+        self.headers = headers
+        self.alignments = alignments
+        self.rows = rows
+    }
+
+    public init(
+        id: String = UUID().uuidString,
+        headers: [String],
+        alignments: [TextAlignment],
+        rawRows: [[String]]
+    ) {
+        self.id = id
+        self.headers = headers
+        self.alignments = alignments
+        self.rows = rawRows.enumerated().map { MarkdownTableRow(id: $0.offset, cells: $0.element) }
+    }
+}
+
+public struct ChatContentBlock: Identifiable, Equatable {
+    public let id: String
+    public let content: BlockContent
+
+    public enum BlockContent: Equatable {
+        case text(String)
+        case table(MarkdownTable)
+    }
+
+    public init(id: String, content: BlockContent) {
+        self.id = id
+        self.content = content
+    }
+}
+
+// MARK: - Markdown Table Parser
+public enum MarkdownTableParser {
+    public static func parse(text: String) -> [ChatContentBlock] {
+        guard text.contains("|") else {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? []
+                : [ChatContentBlock(id: "block_0", content: .text(text))]
+        }
+
+        let normalizedText = text.replacingOccurrences(of: "\r\n", with: "\n")
+        let rawLines = normalizedText.components(separatedBy: "\n")
+        var blocks: [ChatContentBlock] = []
+        var currentTextLines: [String] = []
+
+        func flushTextIfNeeded() {
+            guard !currentTextLines.isEmpty else { return }
+            let textBlock = currentTextLines.joined(separator: "\n")
+            if !textBlock.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                blocks.append(ChatContentBlock(id: "block_\(blocks.count)", content: .text(textBlock)))
+            }
+            currentTextLines.removeAll()
+        }
+
+        var i = 0
+        while i < rawLines.count {
+            let line = rawLines[i]
+
+            // A table requires a header line with '|' followed by a delimiter line
+            if i + 1 < rawLines.count,
+               isPotentialTableRow(line),
+               parseDelimiterRow(line) == nil,
+               let alignments = parseDelimiterRow(rawLines[i + 1]) {
+
+                let headerCells = splitTableRow(line)
+                if !headerCells.isEmpty {
+                    flushTextIfNeeded()
+
+                    var normalizedAlignments = alignments
+                    if normalizedAlignments.count < headerCells.count {
+                        normalizedAlignments += Array(repeating: .leading, count: headerCells.count - normalizedAlignments.count)
+                    } else if normalizedAlignments.count > headerCells.count {
+                        normalizedAlignments = Array(normalizedAlignments.prefix(headerCells.count))
+                    }
+
+                    // Advance past header and delimiter line
+                    i += 2
+
+                    // Parse data rows
+                    var dataRows: [MarkdownTableRow] = []
+                    var rowIdx = 0
+                    while i < rawLines.count {
+                        let rowLine = rawLines[i]
+                        let trimmed = rowLine.trimmingCharacters(in: .whitespaces)
+
+                        // Empty line terminates table
+                        if trimmed.isEmpty {
+                            break
+                        }
+
+                        // Non-table line terminates table
+                        if !isPotentialTableRow(rowLine) {
+                            break
+                        }
+
+                        // Another delimiter row terminates table
+                        if parseDelimiterRow(rowLine) != nil {
+                            break
+                        }
+
+                        var rowCells = splitTableRow(rowLine)
+                        if rowCells.count < headerCells.count {
+                            rowCells += Array(repeating: "", count: headerCells.count - rowCells.count)
+                        } else if rowCells.count > headerCells.count {
+                            rowCells = Array(rowCells.prefix(headerCells.count))
+                        }
+
+                        dataRows.append(MarkdownTableRow(id: rowIdx, cells: rowCells))
+                        rowIdx += 1
+                        i += 1
+                    }
+
+                    let table = MarkdownTable(
+                        id: "table_\(blocks.count)",
+                        headers: headerCells,
+                        alignments: normalizedAlignments,
+                        rows: dataRows
+                    )
+                    blocks.append(ChatContentBlock(id: "block_\(blocks.count)", content: .table(table)))
+                    continue
+                }
+            }
+
+            currentTextLines.append(line)
+            i += 1
+        }
+
+        flushTextIfNeeded()
+
+        return blocks
+    }
+
+    private static func isPotentialTableRow(_ line: String) -> Bool {
+        line.contains("|")
+    }
+
+    public static func splitTableRow(_ line: String) -> [String] {
+        let escapedPlaceholder = "\u{FFF0}"
+        let safeLine = line.replacingOccurrences(of: "\\|", with: escapedPlaceholder)
+        var rawCells = safeLine.components(separatedBy: "|")
+
+        // Drop empty leading cell if line started with '|'
+        if let first = rawCells.first, first.trimmingCharacters(in: .whitespaces).isEmpty, rawCells.count > 1 {
+            rawCells.removeFirst()
+        }
+
+        // Drop empty trailing cell if line ended with '|'
+        if let last = rawCells.last, last.trimmingCharacters(in: .whitespaces).isEmpty, rawCells.count > 1 {
+            rawCells.removeLast()
+        }
+
+        return rawCells.map {
+            $0.replacingOccurrences(of: escapedPlaceholder, with: "|")
+              .trimmingCharacters(in: .whitespaces)
+        }
+    }
+
+    public static func parseDelimiterRow(_ line: String) -> [TextAlignment]? {
+        guard line.contains("-") else { return nil }
+
+        let cells = splitTableRow(line)
+        guard !cells.isEmpty else { return nil }
+
+        var alignments: [TextAlignment] = []
+
+        for cell in cells {
+            let trimmed = cell.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { return nil }
+
+            let allowedCharacters = CharacterSet(charactersIn: "-:")
+            guard CharacterSet(charactersIn: trimmed).isSubset(of: allowedCharacters) else {
+                return nil
+            }
+
+            guard trimmed.contains("-") else { return nil }
+
+            let startsWithColon = trimmed.hasPrefix(":")
+            let endsWithColon = trimmed.hasSuffix(":")
+
+            if startsWithColon && endsWithColon {
+                alignments.append(.center)
+            } else if endsWithColon {
+                alignments.append(.trailing)
+            } else {
+                alignments.append(.leading)
+            }
+        }
+
+        return alignments
+    }
+}
+
+// MARK: - Markdown Content View
+struct MarkdownContentView: View {
+    let text: String
+
+    private var blocks: [ChatContentBlock] {
+        MarkdownTableParser.parse(text: text)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(blocks) { block in
+                switch block.content {
+                case .text(let content):
+                    Text(LocalizedStringKey(content))
+                        .font(.system(size: 14.5, weight: .regular))
+                        .foregroundStyle(Color.white.opacity(0.92))
+                        .lineSpacing(4)
+                case .table(let table):
+                    MarkdownTableView(table: table)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Markdown Table View
+struct MarkdownTableView: View {
+    let table: MarkdownTable
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    // Header Row
+                    headerRow
+
+                    // Header Bottom Divider
+                    Rectangle()
+                        .fill(Color.white.opacity(0.14))
+                        .frame(height: 1)
+
+                    // Data Rows
+                    ForEach(table.rows) { row in
+                        if row.id > 0 {
+                            Rectangle()
+                                .fill(Color.white.opacity(0.06))
+                                .frame(height: 0.5)
+                        }
+                        dataRow(row)
+                    }
+                }
+                .background(Color(red: 21/255, green: 17/255, blue: 48/255))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                )
+            }
+
+            if table.headers.count >= 3 {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.left.and.right")
+                        .font(.system(size: 9))
+                    Text("Geser untuk melihat semua kolom")
+                        .font(.system(size: 10, weight: .regular))
+                }
+                .foregroundStyle(Color.white.opacity(0.42))
+                .padding(.leading, 2)
+                .padding(.top, 1)
+            }
+        }
+        .padding(.vertical, 3)
+    }
+
+    private var headerRow: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(table.headers.enumerated()), id: \.offset) { colIndex, header in
+                headerCell(
+                    text: header,
+                    colIndex: colIndex,
+                    width: columnWidth(for: colIndex)
+                )
+            }
+        }
+        .background(Color.white.opacity(0.08))
+    }
+
+    private func dataRow(_ row: MarkdownTableRow) -> some View {
+        HStack(spacing: 0) {
+            ForEach(table.headers.indices, id: \.self) { colIndex in
+                let cellText = colIndex < row.cells.count ? row.cells[colIndex] : ""
+                dataCell(
+                    text: cellText,
+                    rowIndex: row.id,
+                    colIndex: colIndex,
+                    width: columnWidth(for: colIndex)
+                )
+            }
+        }
+        .background(row.id.isMultiple(of: 2) ? Color.white.opacity(0.025) : Color.clear)
+    }
+
+    private func columnWidth(for colIndex: Int) -> CGFloat {
+        let total = table.headers.count
+        let headerText = colIndex < table.headers.count ? table.headers[colIndex] : ""
+
+        let baseMin: CGFloat
+        if total <= 2 {
+            baseMin = colIndex == 0 ? 140 : 125
+        } else if total == 3 {
+            baseMin = colIndex == 0 ? 120 : 95
+        } else {
+            baseMin = colIndex == 0 ? 115 : 85
+        }
+
+        let estimatedWidth = CGFloat(headerText.count) * 7.5 + 24
+        return max(baseMin, min(220, estimatedWidth))
+    }
+
+    private func frameAlignment(for colIndex: Int) -> Alignment {
+        guard colIndex < table.alignments.count else { return .leading }
+        switch table.alignments[colIndex] {
+        case .leading: return .leading
+        case .center: return .center
+        case .trailing: return .trailing
+        }
+    }
+
+    private func textAlignment(for colIndex: Int) -> TextAlignment {
+        guard colIndex < table.alignments.count else { return .leading }
+        return table.alignments[colIndex]
+    }
+
+    @ViewBuilder
+    private func headerCell(text: String, colIndex: Int, width: CGFloat) -> some View {
+        HStack(spacing: 0) {
+            Text(LocalizedStringKey(text))
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(Color.white)
+                .multilineTextAlignment(textAlignment(for: colIndex))
+                .lineLimit(2)
+        }
+        .frame(width: width, alignment: frameAlignment(for: colIndex))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .overlay(alignment: .trailing) {
+            if colIndex < table.headers.count - 1 {
+                Rectangle()
+                    .fill(Color.white.opacity(0.12))
+                    .frame(width: 1)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func dataCell(text: String, rowIndex: Int, colIndex: Int, width: CGFloat) -> some View {
+        let isPlaceholder = text.trimmingCharacters(in: .whitespaces).isEmpty
+        let displayContent = isPlaceholder ? "-" : text
+
+        HStack(spacing: 0) {
+            Text(LocalizedStringKey(displayContent))
+                .font(.system(size: 12, weight: .regular))
+                .foregroundStyle(isPlaceholder ? Color.white.opacity(0.35) : cellTextColor(for: text))
+                .monospacedDigit()
+                .multilineTextAlignment(textAlignment(for: colIndex))
+                .lineLimit(2)
+        }
+        .frame(width: width, alignment: frameAlignment(for: colIndex))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .overlay(alignment: .trailing) {
+            if colIndex < table.headers.count - 1 {
+                Rectangle()
+                    .fill(Color.white.opacity(0.06))
+                    .frame(width: 1)
+            }
+        }
+    }
+
+    private func cellTextColor(for rawText: String) -> Color {
+        let clean = rawText
+            .replacingOccurrences(of: "*", with: "")
+            .trimmingCharacters(in: .whitespaces)
+            .uppercased()
+
+        if clean == "BUY" || clean == "BELI" || clean == "RECOMMENDED" {
+            return .ProfitGreen
+        }
+        if clean == "SELL" || clean == "JUAL" || clean == "CAUTION" {
+            return .LossRed
+        }
+        if clean.hasPrefix("+") && clean.hasSuffix("%") {
+            return .ProfitGreen
+        }
+        if clean.hasPrefix("-") && clean.hasSuffix("%") {
+            return .LossRed
+        }
+        return Color.white.opacity(0.90)
+    }
+}
+
 // MARK: - Chat Bubble Row
 struct ChatBubbleRow: View {
     let message: ChatMessage
@@ -168,10 +591,7 @@ struct ChatBubbleRow: View {
             } else {
                 VStack(alignment: .leading, spacing: 10) {
                     // Message Content
-                    Text(LocalizedStringKey(message.displayText))
-                        .font(.system(size: 14.5, weight: .regular))
-                        .foregroundStyle(Color.white.opacity(0.92))
-                        .lineSpacing(4)
+                    MarkdownContentView(text: message.displayText)
 
                     if message.isFinished {
                         // Source Indicator
