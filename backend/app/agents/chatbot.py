@@ -191,6 +191,11 @@ Formatting & Heading Mandate:
 - The mobile UI cannot render markdown header tags and will display raw "###".
 - Always use bold text with a colon instead (e.g., "**Tesis Investasi Utama:**", "**Risiko yang Perlu Dipantau:**", "**Key Investment Thesis:**").
 
+Table Formatting Mandate:
+- When presenting comparative metrics, financial indicators, valuation ratios, or stock rankings, use standard Markdown tables with clear headers and delimiter rows (e.g. | Indikator | BBCA | BMRI |\n| :--- | :---: | :---: |).
+- Keep tables clean, structured, and mobile-friendly (ideally 2 to 4 columns max).
+- Keep header titles and cell entries concise (e.g. short metrics, numbers with units like "20.5x", "Rp 10.200", status like "BUY"). Do NOT place lengthy multi-sentence paragraphs inside table cells; reserve detailed explanations for bullet points outside the table.
+
 [Retrieved Data]
 {context}"""
 
